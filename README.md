@@ -32,10 +32,10 @@ Note: at the time of ESP-IDF release 5.1 is not yet a final stable release, but 
 
 Tested with an Nordic Power Profiler kit II, showing an average power consumption of 1.44mAh 
 
-Of note: the number above accounts for:
-    reporting to both MQTT and PWSWeather.com every 15 minutes,
-	the removal of the red power LED on the ESP32-C6 dev kit to reduced ongoing power consumption (by .3mAh), and
-	the setting of the ESP-IDF menuconfig Log Output option to 'No output' for the final project to be deployed into use
+Of note: the number above is based on:
+- reporting to both MQTT and PWSWeather.com every 15 minutes,
+- the removal of the red power LED on the ESP32-C6 dev kit to reduced ongoing power consumption (by .3mAh), and
+- the setting of the ESP-IDF menuconfig Log Output option to 'No output' for the final project to be deployed into use
 	
 # The code
 
