@@ -16,11 +16,11 @@ Open source Weather Station by Rob Latour, 2023, MIT license
 
 # Reporting to
 
-1. an MQTT broker (such as the Mosquitto broker running on Home Assistant) for internal access to your data
+- an MQTT broker (such as the Mosquitto broker running on Home Assistant) for internal access to your data
 
-2. (optionally) PWSWeather.com by Aerisweather, using a free account for external access to your data.
-   PWSWeather.com provides a web based presentation of your current and historical weather station data and 
-   facilitates sharing your readings globally
+- (optionally) PWSWeather.com by Aerisweather, using a free account for external access to your data.
+  PWSWeather.com provides a web based presentation of your current and historical weather station data and 
+  facilitates sharing your readings globally
 
 # Build environment
 
