@@ -1,4 +1,4 @@
-# WeatherStation
+# WeatherStation (using an ESP32-C6, WiFi 6, BME680 sensor, publishing to MQTT and optionally PWSWeather.com)
 
 Open source Weather Station by Rob Latour, 2023, MIT license
 
