@@ -45,5 +45,5 @@ The code includes two companion files in the main directory:
 	
 The code itself is also well commented, and includes commented out code (that you can uncomment if you like) to confirm a WiFi 6 connection
 
-Uses a I2C and BME680 driver from this Espressif ESP-IDF component libarary https://github.com/UncleRus/esp-idf-lib
+Uses a I2C and BME680 driver from this Espressif ESP-IDF component libarary https://github.com/UncleRus/esp-idf-lib . 
 The BME680 driver was forked from the original driver by Gunar Schorcht https://github.com/gschorcht/bme680-esp-idf
