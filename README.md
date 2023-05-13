@@ -40,8 +40,8 @@ Of note: the number above is based on:
 # The code
 
 The code includes two companion files in the main directory:
-	user_settings_general.h  used to change various settings, such as the number of minutes between readings
-	user_settings_secret.h   used to change 'secret' settings, such as your WiFi password
+- user_settings_general.h  used to change various settings, such as the number of minutes between readings
+- user_settings_secret.h   used to change 'secret' settings, such as your WiFi password
 	
 The code itself is also well commented, and includes commented out code (that you can uncomment if you like) to confirm a WiFi 6 connection
 
