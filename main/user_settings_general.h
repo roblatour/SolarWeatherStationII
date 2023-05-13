@@ -1,0 +1,27 @@
+// mqtt
+#define USER_SETTINGS_GENERAL_MQTT_BROKER_URL "mqtt://192.168.1.173"
+#define USER_SETTINGS_GENERAL_MQTT_BROKER_PORT 1883
+#define USER_SETTINGS_GENERAL_MQTT_QOS 2
+#define USER_SETTINGS_GENERAL_MQTT_RETAIN 0
+#define USER_SETTINGS_GENERAL_MQTT_TOPIC "WeatherStation-1"
+
+// GPIO PIN attached to an external physical switch used to toggle on / off reporting to PWSWeather.com
+#define USER_SETTINGS_GENERAL_EXTERNAL_SWITCH_GPIO_PIN GPIO_NUM_12
+
+// reporting frequency
+#define USER_SETTINGS_GENERAL_MINUTES_BETWEEN_READINGS 15
+
+// time out period (in seconds) to get all the publishing done
+#define USER_SETTINGS_GENERAL_PUBLISHING_TIMEOUT_PERIOD 30
+
+// debugging
+#define USER_SETTINGS_GENERAL_TAG  "Weather Station"
+
+// BME680 sensor
+#define USER_SETTINGS_GENERAL_BME680_I2C_ADDR 0x77
+#define USER_SETTINGS_GENERAL_PORT 0
+#define USER_SETTINGS_GENERAL_I2C_SDA 21
+#define USER_SETTINGS_GENERAL_I2C_SCL 22
+
+// Used to power up and down the BME680 sensor
+#define USER_SETTINGS_GENERAL_POWER_SENSOR_CONTROLLER_PIN GPIO_NUM_20

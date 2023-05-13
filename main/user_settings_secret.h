@@ -1,0 +1,13 @@
+// wifi
+#define USER_SETTINGS_SECRET_SSID  "XXXXXX" 
+#define USER_SETTINGS_SECRET_PASSWORD "xxxxxxxxxxxx" 
+
+// mqtt
+#define USER_SETTINGS_SECRET_MQTT_USER_ID "XXXXXXXX"
+#define USER_SETTINGS_SECRET_MQTT_USER_PASS "xxxxxxxxxxxxx"
+
+// PWSWeather.com
+#define USER_SETTINGS_SECRET_PWS_STATION_ID "XXXXXXXXXXXXXXX"
+#define USER_SETTINGS_SECRET_PWS_API_KEY "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+
