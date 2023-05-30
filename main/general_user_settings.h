@@ -20,7 +20,7 @@
 //
 #define WORKAROUND 0 // for no work-around set to zero (program will use light sleep and auto reconnected as needed); to use work-around 1 set to 1; to use work-around 2 set to 2
 //
-// There is an open github issue on this problem at xxxx
+// There is an open github issue on this problem at https://github.com/espressif/esp-idf/issues/11550
 // 
 
 // reporting frequency  

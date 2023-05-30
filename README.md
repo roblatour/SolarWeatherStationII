@@ -1,5 +1,5 @@
 # WeatherStation 
-  (using an ESP32-C6, WiFi 6, BME680 sensor, publishing to MQTT and optionally PWSWeather.com)
+  using an ESP32-C6, WiFi 6, BME680 sensor, publishing to MQTT and optionally PWSWeather.com
 
 Open source Weather Station by Rob Latour, 2023, MIT license
 
@@ -16,8 +16,8 @@ Open source Weather Station by Rob Latour, 2023, MIT license
   (uses an internal pullup resistor (so a resistor external to the ESP32-C6 dev kit isn't required)
 
 Note: at the time of release there is a known issue that a WiFi 6 does not always stay connected while in light sleep, especially for light sleep periods over three minutes
-      this issue seems to be more pronounced the longer the program is in light sleep, and it has been raised here:
-      the code includes two optional work-arounds.  
+      this issue seems to be more pronounced the longer the program is in light sleep, and it has been raised here: https://github.com/espressif/esp-idf/issues/11550
+      the code offers two optional work-arounds for the above issue  
       For more information, please see the 'Power Consumption' section below
 
 # Reporting to
