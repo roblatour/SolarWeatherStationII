@@ -1,8 +1,14 @@
+// (Wi-Fi 6) Weather Station
+
 // Copyright Rob Latour, 2023
 // License MIT
+// open source project: https://github.com/roblatour/WeatherStation
 
-#include "user_settings_general.h"
-#include "user_settings_secret.h"
+// Running on an esp32-c6 for Wifi 6 (802.11ax) using Target Wake Time to reduce power consumption
+
+#include "sdkconfig.h"
+#include "general_user_settings.h"
+#include "secret_user_settings.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -11,6 +17,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
+#include "freertos/event_groups.h"
 
 #include <esp_system.h>
 
@@ -30,6 +37,8 @@
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
+#include "lwip/err.h"
+#include "lwip/api.h"
 
 #include "mqtt_client.h"
 
@@ -40,232 +49,192 @@
 #include <sys/param.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include "esp_log.h"
-#include "nvs_flash.h"
-#include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_tls.h"
 
-#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-#include "esp_crt_bundle.h"
-#endif
-
-#include <esp_http_client.h>
-
-// wifi
-#define DEFAULT_SSID USER_SETTINGS_SECRET_SSID
-#define DEFAULT_PWD USER_SETTINGS_SECRET_PASSWORD
-
-// mqtt
-#define MQTT_USER_ID USER_SETTINGS_SECRET_MQTT_USER_ID
-#define MQTT_USER_PASS USER_SETTINGS_SECRET_MQTT_USER_PASS
-#define MQTT_BROKER_URL USER_SETTINGS_GENERAL_MQTT_BROKER_URL
-#define MQTT_BROKER_PORT USER_SETTINGS_GENERAL_MQTT_BROKER_PORT
-#define MQTT_QOS USER_SETTINGS_GENERAL_MQTT_QOS
-#define MQTT_RETAIN USER_SETTINGS_GENERAL_MQTT_RETAIN
-#define MQTT_TOPIC USER_SETTINGS_GENERAL_MQTT_TOPIC
-#define DEFAULT_LISTEN_INTERVAL 100
-#define DEFAULT_BEACON_TIMEOUT 15000
-
-// PWSWeather.com
-#define PWS_STATION_ID USER_SETTINGS_SECRET_PWS_STATION_ID
-#define SECRET_PSW_API_KEY USER_SETTINGS_SECRET_PWS_API_KEY
-
-// GPIO PIN attached to an external physical switch used to toggle on / off reporting to PWSWeather.com
-#define EXTERNAL_SWITCH_GPIO_PIN USER_SETTINGS_GENERAL_EXTERNAL_SWITCH_GPIO_PIN
-
-// reporting frequency
-#define MINUTES_BETWEEN_READINGS USER_SETTINGS_GENERAL_MINUTES_BETWEEN_READINGS
-
-// time out period (in seconds) to get all the publishing done
-#define PUBLISHING_TIMEOUT_PERIOD USER_SETTINGS_GENERAL_PUBLISHING_TIMEOUT_PERIOD
+#include "cmd_system.h"
+#include "wifi_cmd.h"
+#include "esp_wifi_he.h"
 
 // debugging
-static const char *TAG = USER_SETTINGS_GENERAL_TAG;
+static const char *TAG = GENERAL_USER_SETTINGS_TAG;
 
 // BME680 sensor
-#define BME680_I2C_ADDR USER_SETTINGS_GENERAL_BME680_I2C_ADDR
-#define PORT USER_SETTINGS_GENERAL_PORT
-#define I2C__SDA USER_SETTINGS_GENERAL_I2C_SDA
-#define I2C__SCL USER_SETTINGS_GENERAL_I2C_SCL
-
 #define HTTP_RESPONSE_BUFFER_SIZE 1024
 #define MAX_HTTP_RECV_BUFFER 512
 #define MAX_HTTP_OUTPUT_BUFFER 2048
 
 // Used to power up and down the BME680 sensor
-#define POWER_SENSOR_CONTROLLER_PIN USER_SETTINGS_GENERAL_POWER_SENSOR_CONTROLLER_PIN
 #define POWER_ON 1
 #define POWER_OFF 0
 
-// Misc
-#ifndef APP_CPU_NUM
-#define APP_CPU_NUM PRO_CPU_NUM
-#endif
+// WIFI
+#define ITWT_TRIGGER_ENABLED 1 // 0 = FALSE, 1 = TRUE
+#define ITWT_ANNOUNCED 1       // 0 = FALSE, 1 = TRUE
+#define ITWT_MIN_WAKE_DURATION 255
 
-#if CONFIG_EXAMPLE_POWER_SAVE_MIN_MODEM
-#define DEFAULT_PS_MODE WIFI_PS_MIN_MODEM
-#elif CONFIG_EXAMPLE_POWER_SAVE_MAX_MODEM
-#define DEFAULT_PS_MODE WIFI_PS_MAX_MODEM
-#elif CONFIG_EXAMPLE_POWER_SAVE_NONE
-#define DEFAULT_PS_MODE WIFI_PS_NONE
-#else
-#define DEFAULT_PS_MODE WIFI_PS_NONE
-#endif
+#define WIFI_LISTEN_INTERVAL 100
 
 // Global variables
 
-volatile bool BME680_readings_are_valid;
+volatile bool BME680_readings_are_reasonable;
 volatile float temperature;
 volatile float humidity;
 volatile float pressure;
 
-volatile bool WiFiReady;
+enum Wifi_status
+{
+    WIFI_CHECKING = 0,
+    WIFI_UP = 1,
+    WIFI_DOWN = 2
+};
 
-volatile bool MQTT_Publishing_Done;
+volatile enum Wifi_status WiFi_current_status;
+
+volatile bool WiFi_is_connected = false;
+volatile bool WiFi6_TWT_setup_successfully = false;
+volatile bool MQTT_is_connected = false;
+volatile bool Light_sleep_enabled = false;
+
+volatile int MQTT_published_messages;
+volatile bool MQTT_publishing_in_progress;
+volatile bool MQTT_unknown_error = false;
+
 volatile bool PWSWeather_Publishing_Done;
+volatile bool PWSWeather_unknown_error = false;
 
-/*
-void confirm_protocol_in_use()
+volatile esp_mqtt_client_handle_t MQTT_client;
+
+const int CONNECTED_BIT = BIT0;
+const int DISCONNECTED_BIT = BIT1;
+esp_netif_t *netif_sta = NULL;
+EventGroupHandle_t wifi_event_group;
+
+volatile int64_t cycle_start_time;
+
+void MQTT_publish_a_reading(const char *subtopic, float value)
 {
 
-    wifi_phy_mode_t WiFiMode;
-    if (esp_wifi_sta_get_negotiated_phymode(&WiFiMode) == ESP_OK)
-    {
-        if (WiFiMode == WIFI_PHY_MODE_11B)
-            ESP_LOGI(TAG, "11b");
+    static char topic[100];
+    strcpy(topic, GENERAL_USER_SETTINGS_MQTT_TOPIC);
+    strcat(topic, "/");
+    strcat(topic, subtopic);
 
-        if (WiFiMode  == WIFI_PHY_MODE_11G)
-            ESP_LOGI(TAG, "11g");
+    static char payload[13];
+    sprintf(payload, "%g", value);
 
-        if (WiFiMode == WIFI_PHY_MODE_LR)
-            ESP_LOGI(TAG, "Low rate");
-
-        if (WiFiMode == WIFI_PHY_MODE_HT20)
-            ESP_LOGI(TAG, "HT20");
-
-        if (WiFiMode == WIFI_PHY_MODE_HT40)
-            ESP_LOGI(TAG, "HT40");
-
-        if (WiFiMode == WIFI_PHY_MODE_HE20)
-            ESP_LOGI(TAG, "HE20");  // this is WiFi 6
-    }
+    ESP_LOGI(TAG, "publish: %s %s", topic, payload);
+    esp_mqtt_client_publish(MQTT_client, topic, payload, 0, GENERAL_USER_SETTINGS_MQTT_QOS, GENERAL_USER_SETTINGS_MQTT_RETAIN);
 }
 
-*/
+void MQTT_publish_all_readings()
+{
+    MQTT_published_messages = 0;
+    MQTT_publish_a_reading("temperature", temperature);
+    MQTT_publish_a_reading("humidity", humidity);
+    MQTT_publish_a_reading("pressure", pressure);
+};
 
-static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
+esp_mqtt_event_handle_t event;
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
 
-    static int confirmed_published_readings = 0;
-
-    esp_mqtt_client_handle_t client = event->client;
+    esp_mqtt_event_handle_t event = event_data;
 
     switch (event->event_id)
     {
     case MQTT_EVENT_BEFORE_CONNECT:
-        ESP_LOGV(TAG, "MQTT_EVENT_BEFORE_CONNECT");
+        ESP_LOGI(TAG, "MQTT_EVENT_BEFORE_CONNECT");
         break;
 
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGV(TAG, "MQTT_EVENT_CONNECTED");
-
-        // used to confirm when mqtt messages have all been published
-        // this is done by having this program subscribe to the topics which it will itself be publishing
-        // in this way this program can confirm the published topics have actually being processed by the MQTT Server
-        // also, this program will count the number of publications received, and when it receives three
-        // (one for temp, one for pressure, and one for humidity) then it will know all publishing is complete for the current cycle
-        // and it can advance towards deep sleep
-        char TopicAndAllSubTopics[100] = MQTT_TOPIC;
-        strcat(TopicAndAllSubTopics, "/#");
-        esp_mqtt_client_subscribe(client, TopicAndAllSubTopics, 2);
+        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        MQTT_is_connected = true;
         break;
 
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGV(TAG, "MQTT_EVENT_DISCONNECTED");
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        MQTT_is_connected = false;
         break;
 
-    case MQTT_EVENT_SUBSCRIBED:
-        ESP_LOGV(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        break;
+        // case MQTT_EVENT_SUBSCRIBED:
+        //     ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        //     break;
 
-    case MQTT_EVENT_UNSUBSCRIBED:
-        ESP_LOGV(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
-        break;
+        // case MQTT_EVENT_UNSUBSCRIBED:
+        //     ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        //     break;
 
     case MQTT_EVENT_PUBLISHED:
-        ESP_LOGV(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+
+        // ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+
+        MQTT_published_messages++;
+        if (MQTT_published_messages >= 3)
+        {
+            ESP_LOGI(TAG, "MQTT publishing complete");
+            MQTT_publishing_in_progress = false;
+        };
         break;
 
     case MQTT_EVENT_DATA:
-        // ESP_LOGV(TAG, "MQTT_EVENT_DATA");
-        // ESP_LOGI(TAG, "TOPIC = %.*s", event->topic_len, event->topic);
-        // ESP_LOGI(TAG, "DATA = %.*s", event->data_len, event->data);
-        confirmed_published_readings++;
-        // once we have three readings (temp, pressure and humidity) set the MQTT_Publishing_Done flag to confirmed our job here is done
-        if (confirmed_published_readings >= 3)
-            MQTT_Publishing_Done = true;
+        ESP_LOGI(TAG, "Confirmed %.*s received", event->topic_len, event->topic);
         break;
 
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT_EVENT_ERROR");
+        MQTT_unknown_error = true;
         break;
 
     default:
         ESP_LOGW(TAG, "Other mqtt event id:%d", event->event_id);
         break;
     }
-    return ESP_OK;
 }
 
-static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
-{
-    ESP_LOGD(TAG, "mqtt_event_handler event: base=%s, event_id=%ld", base, event_id);
-    mqtt_event_handler_cb(event_data);
-}
-
-esp_mqtt_client_handle_t client;
-
-static void mqtt_app_start(void)
+void get_bme680_readings()
 {
 
-    const esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URL,
-        .broker.address.port = MQTT_BROKER_PORT,
-        .credentials.username = MQTT_USER_ID,
-        .credentials.authentication.password = MQTT_USER_PASS,
-    };
-
-    client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-    esp_mqtt_client_start(client);
-}
-
-void get_bme680_readings(void *pvParameters)
-{
     // Gets temperature, pressure and humidity from the BME680.
-    // Do not get gas_resistance as gas_resistance readings.
-    // If successful return true; otherwise return false;
+    // Do not get gas_resistance.
 
-    vTaskDelay(100 / portTICK_PERIOD_MS); // short pause so this starts at the optional time
-    ESP_LOGV(TAG, "Get readings");
+    static bool doOnce = true;
+
+    static bme680_t sensor;
+
+    bme680_values_float_t values;
 
     temperature = 0;
     humidity = 0;
     pressure = 0;
 
-    bme680_t sensor;
+    BME680_readings_are_reasonable = false;
 
     // power up the BME680 sensor
-    ESP_LOGI(TAG, "Power on the BME680");
-    gpio_reset_pin(POWER_SENSOR_CONTROLLER_PIN);
-    gpio_set_direction(POWER_SENSOR_CONTROLLER_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(POWER_SENSOR_CONTROLLER_PIN, POWER_ON);
+    // one time setup for the BME680 sensor power pin
+    if (doOnce)
+    {
+        esp_rom_gpio_pad_select_gpio(GENERAL_USER_SETTINGS_POWER_SENSOR_CONTROLLER_PIN);
+        gpio_reset_pin(GENERAL_USER_SETTINGS_POWER_SENSOR_CONTROLLER_PIN);
+        gpio_set_direction(GENERAL_USER_SETTINGS_POWER_SENSOR_CONTROLLER_PIN, GPIO_MODE_OUTPUT);
+        doOnce = false;
+    };
+
+    gpio_set_level(GENERAL_USER_SETTINGS_POWER_SENSOR_CONTROLLER_PIN, POWER_ON);
+    ESP_LOGI(TAG, "BME680 powered on");
+
+    // wait for the sensor to fully power up
+    vTaskDelay(25 / portTICK_PERIOD_MS);
+
+    ESP_LOGI(TAG, "taking BME680 readings");
 
     // initialize the sensor
     ESP_ERROR_CHECK(i2cdev_init());
+
     memset(&sensor, 0, sizeof(bme680_t));
-    ESP_ERROR_CHECK(bme680_init_desc(&sensor, BME680_I2C_ADDR, PORT, I2C__SDA, I2C__SCL));
+    ESP_ERROR_CHECK(bme680_init_desc(&sensor, GENERAL_USER_SETTINGS_BME680_I2C_ADDR, GENERAL_USER_SETTINGS_PORT, GENERAL_USER_SETTINGS_I2C_SDA, GENERAL_USER_SETTINGS_I2C_SCL));
+    // wait for the sensor to power up
+
     ESP_ERROR_CHECK(bme680_init_sensor(&sensor));
 
     // turn off reporting for gas_resistance
@@ -285,61 +254,144 @@ void get_bme680_readings(void *pvParameters)
     // Set ambient temperature n/a
     // bme680_set_ambient_temperature(&sensor, 20);
 
-    // get the time (duration) needed for a valid set of readings
+    // get the delay time (duration) required to get a set of readings
     uint32_t duration;
     bme680_get_measurement_duration(&sensor, &duration);
 
-    bme680_values_float_t values;
-
-    int tries = 0;
-    int max_tries = 5;
-
-    while (!BME680_readings_are_valid && (tries < max_tries))
+    // for some reason the first measurement is always wrong
+    // so take a throw away measurement
+    // this measurement will not counted in the attempts counter below
+    if (bme680_force_measurement(&sensor) == ESP_OK)
     {
-        ESP_LOGI(TAG, "Take the readings now");
+        vTaskDelay(duration);
+        if (bme680_get_results_float(&sensor, &values) == ESP_OK)
+        {
+            // ESP_LOGI(TAG, "throw away measurement taken");
+        }
+    };
+
+    int attempts = 0;
+    int max_attempts = 10;
+    // take up to max_attempts measurements until the readings are valid
+
+    while (!BME680_readings_are_reasonable && (attempts++ < max_attempts))
+    {
+
         if (bme680_force_measurement(&sensor) == ESP_OK)
         {
             vTaskDelay(duration); // wait until measurement results are available
 
-            if (bme680_get_results_float(&sensor, &values) == ESP_OK)
-                BME680_readings_are_valid = (values.pressure > 0);
+            temperature = values.temperature;
+            humidity = values.humidity;
+            pressure = values.pressure;
 
-            if (BME680_readings_are_valid)
+            if (bme680_get_results_float(&sensor, &values) == ESP_OK)
             {
-                temperature = values.temperature;
-                humidity = values.humidity;
-                pressure = values.pressure;
+                // apply a reasonability check against the readings
+                BME680_readings_are_reasonable = ((humidity <= 100.0f) && (temperature >= -60.0f) && (temperature <= 140.0f) && (pressure >= 870.0f));
+
+                if (!BME680_readings_are_reasonable)
+                {
+                    ESP_LOGE(TAG, "readings: Temperature: %.2f °C   Humidity: %.2f %%   Pressure: %.2f hPa", temperature, humidity, pressure);
+                    ESP_LOGE(TAG, "the above readings are unreasonable; will try again ( %d of %d )", attempts, max_attempts);
+                }
+            }
+            else
+            {
+                ESP_LOGE(TAG, "could not get BME680 readings; will try again ( %d of %d )", attempts, max_attempts);
             }
         }
-        tries++;
     };
 
     // power down the BME680 sensor
-    ESP_LOGI(TAG, "Power off the BME680");
-    gpio_set_level(POWER_SENSOR_CONTROLLER_PIN, POWER_OFF);
+    gpio_set_level(GENERAL_USER_SETTINGS_POWER_SENSOR_CONTROLLER_PIN, POWER_OFF);
+    ESP_LOGI(TAG, "BME680 powered off");
 
-    if (BME680_readings_are_valid)
-        ESP_LOGI(TAG, "\n\n*** Readings:\n***  Temperature:  %.2f °C\n***  Humidity:     %.2f %%\n***  Pressure:    %.2f hPa\n", temperature, humidity, pressure);
-    else
-        ESP_LOGE(TAG, "Could not get valid readings from the BME680");
+    // release the I2C bus
+    ESP_ERROR_CHECK(i2cdev_done());
+    vTaskDelay(20 / portTICK_PERIOD_MS);
 
-    vTaskDelete(NULL);
+    if ((LOG_LOCAL_LEVEL != ESP_LOG_NONE) && (BME680_readings_are_reasonable))
+    {
+        ESP_LOGI(TAG, "readings: Temperature: %.2f °C   Humidity: %.2f %%   Pressure: %.2f hPa", temperature, humidity, pressure);
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
 }
 
-void publish_a_reading(const char *subtopic, float value)
+void publish_readings_via_MQTT()
 {
 
-    char topic[100] = MQTT_TOPIC;
-    strcat(topic, "/");
-    strcat(topic, subtopic);
+    const esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = GENERAL_USER_SETTINGS_MQTT_BROKER_URL,
+        .broker.address.port = GENERAL_USER_SETTINGS_MQTT_BROKER_PORT,
+        .credentials.username = SECRET_USER_SETTINGS_MQTT_USER_ID,
+        .credentials.authentication.password = SECRET_USER_SETTINGS_MQTT_USER_PASS,
+        //.session.disable_keepalive = true,    // this fails on my network; it may work on yours?
+        .session.keepalive = INT_MAX, // using this instead of the above
+        .network.disable_auto_reconnect = true,
+        .network.refresh_connection_after_ms = (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES + 1) * 60 * 1000,
+    };
 
-    char payload[13];
-    sprintf(payload, "%g", value);
+    MQTT_is_connected = false;
+    MQTT_unknown_error = false;
+    MQTT_publishing_in_progress = true;
 
-    // ESP_LOGI(TAG, "Publish");
-    // ESP_LOGI(TAG, "   Topic:    %s", topic);
-    // ESP_LOGI(TAG, "   Payload:  %s", payload);
-    esp_mqtt_client_publish(client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN);
+    int64_t timeout = esp_timer_get_time() + GENERAL_USER_SETTINGS_MQTT_PUBLISHING_TIMEOUT_PERIOD * 1000000;
+
+    int attempts = 0;
+    const int max_attempts = 3;
+
+    while (!MQTT_is_connected && (attempts++ < max_attempts) && MQTT_publishing_in_progress)
+    {
+        if (esp_timer_get_time() < timeout)
+        {
+            ESP_LOGI(TAG, "Attempting to connect to MQTT (attempt %d of %d)", attempts, max_attempts);
+
+            MQTT_unknown_error = false;
+
+            if (esp_timer_get_time() < timeout)
+            {
+                MQTT_client = esp_mqtt_client_init(&mqtt_cfg);
+                esp_mqtt_client_register_event(MQTT_client, ESP_EVENT_ANY_ID, mqtt_event_handler, MQTT_client);
+                ESP_LOGI(TAG, "Starting MQTT client");
+                esp_mqtt_client_start(MQTT_client);
+
+                while ((!MQTT_is_connected) && (!MQTT_unknown_error) && (esp_timer_get_time() < timeout))
+                    vTaskDelay(20 / portTICK_PERIOD_MS);
+            }
+
+            // wait for WiFi to connect (in case it has dropped out)
+            while ((!WiFi_is_connected) && (esp_timer_get_time() < timeout))
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+
+            if (MQTT_is_connected)
+            {
+
+                ESP_LOGI(TAG, "MQTT connected (attempt %d of %d)", attempts, max_attempts);
+
+                if (MQTT_publishing_in_progress)
+                    MQTT_publish_all_readings();
+
+                while (MQTT_publishing_in_progress && (!MQTT_unknown_error) && (esp_timer_get_time() < timeout))
+                    vTaskDelay(20 / portTICK_PERIOD_MS);
+
+                esp_mqtt_client_destroy(MQTT_client);
+                vTaskDelay(40 / portTICK_PERIOD_MS);
+            }
+            else
+            {
+                esp_mqtt_client_unregister_event(MQTT_client, ESP_EVENT_ANY_ID, mqtt_event_handler);
+                ESP_LOGI(TAG, "MQTT failed to connected (attempt %d of %d)", attempts, max_attempts);
+                if (attempts == max_attempts)
+                    ESP_LOGE(TAG, "Reached the MQTT connection attempt threshold");
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+                MQTT_unknown_error = true;
+            };
+
+            if (esp_timer_get_time() >= timeout)
+                ESP_LOGE(TAG, "Timed out trying to connect to MQTT");
+        };
+    };
 }
 
 // Callback function for HTTP events
@@ -348,167 +400,329 @@ esp_err_t http_event_handler(esp_http_client_event_t *evt)
     switch (evt->event_id)
     {
     case HTTP_EVENT_ERROR:
-        ESP_LOGI(TAG, "HTTP_EVENT_ERROR\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_ERROR");
         break;
     case HTTP_EVENT_ON_CONNECTED:
-        ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
         break;
     case HTTP_EVENT_HEADER_SENT:
-        ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
         break;
     case HTTP_EVENT_ON_HEADER:
-        ESP_LOGI(TAG, "HTTP_EVENT_ON_HEADER\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_ON_HEADER");
         break;
     case HTTP_EVENT_ON_DATA:
-        ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA");
         ESP_LOGI(TAG, "%.*s", evt->data_len, (char *)evt->data);
         break;
     case HTTP_EVENT_ON_FINISH:
-        ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
         break;
     case HTTP_EVENT_DISCONNECTED:
-        ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED\n");
+        ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
         break;
     case HTTP_EVENT_REDIRECT:
-        ESP_LOGI(TAG, "HTTP_EVENT_ON_REDIRECT\n");
-        esp_http_client_set_header(evt->client, "From", "user@example.com");
-        esp_http_client_set_header(evt->client, "Accept", "text/html");
-        esp_http_client_set_redirection(evt->client);
+        ESP_LOGI(TAG, "HTTP_EVENT_ON_REDIRECT");
     }
     return ESP_OK;
 }
 
 // Function to upload weather data to PWSweather
-void publish_readings_to_PWSWeather(void *pvParameters)
+void publish_readings_to_PWSWeather_now()
 {
 
-    // Create the HTTP client
-    esp_http_client_config_t config = {
+    PWSWeather_Publishing_Done = false;
+
+    // Create the HTTP HTTP_client
+    const esp_http_client_config_t config = {
         .url = "https://pwsupdate.pwsweather.com/api/v1/submitwx?",
         .method = HTTP_METHOD_GET,
         .event_handler = http_event_handler,
         .disable_auto_redirect = true,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_handle_t HTTP_client = esp_http_client_init(&config);
 
     // Set the URL line
     char url_line[250];
     sprintf(url_line, "ID=%s&PASSWORD=%s&dateutc=now&tempf=%.1f&humidity=%.1f&baromin=%.2f&softwaretype=ESP32DIY&action=updateraw",
-            PWS_STATION_ID, SECRET_PSW_API_KEY, temperature * 1.8 + 32.0, (float)humidity, pressure * 0.02952998751);
+            SECRET_USER_SETTINGS_PWS_STATION_ID, SECRET_USER_SETTINGS_PWS_API_KEY, temperature * 1.8 + 32.0, (float)humidity, pressure * 0.02952998751);
 
     ESP_LOGI(TAG, "%s", url_line);
 
     // Set the HTTP headers
-    esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");
-    esp_http_client_set_header(client, "Content-Length", "0");
+    esp_http_client_set_header(HTTP_client, "Content-Type", "application/x-www-form-urlencoded");
+    esp_http_client_set_header(HTTP_client, "Content-Length", "0");
 
     // Set the POST data length
-    esp_http_client_set_post_field(client, url_line, strlen(url_line));
+    esp_http_client_set_post_field(HTTP_client, url_line, strlen(url_line));
+
+    // set the timeout
+    esp_http_client_set_timeout_ms(HTTP_client, (int)(GENERAL_USER_SETTINGS_PWSWEATHER_PUBLISHING_TIMEOUT_PERIOD_IN_SECONDS * 1000));
 
     // Perform the HTTP request
-    esp_err_t err = esp_http_client_perform(client);
-
-    if (err != ESP_OK)
+    esp_err_t err = esp_http_client_perform(HTTP_client);
+    if (err == ESP_OK)
     {
-        printf("Error: esp_http_client_perform failed with error code %d\n", err);
+        PWSWeather_unknown_error = false;
+        ESP_LOGI(TAG, "PWSWeather publishing complete");
     }
-
-    // Cleanup
-    esp_http_client_cleanup(client);
-
-    PWSWeather_Publishing_Done = true;
-    vTaskDelete(NULL);
-}
-
-void publish_readings_via_MQTT(void *pvParameters)
-{
-
-    ESP_LOGV(TAG, "Start MQTT");
-    mqtt_app_start();
-
-    ESP_LOGV(TAG, "Publish readings");
-
-    publish_a_reading("temperature", temperature);
-    publish_a_reading("humidity", humidity);
-    publish_a_reading("pressure", pressure);
-
-    vTaskDelete(NULL);
-}
-
-// Wifi logic stuff
-
-static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
-{
-
-    if (event_base == WIFI_EVENT)
-
-        switch (event_id)
-        {
-
-        case WIFI_EVENT_STA_START:
-            ESP_LOGV(TAG, "WiFi start");
-            esp_wifi_connect();
-            break;
-
-        case WIFI_EVENT_STA_CONNECTED:
-            ESP_LOGI(TAG, "WiFi connected");
-            // confirm_protocol_in_use(); // may be used in testing to confirm a wifi 6 connection
-            break;
-
-        case WIFI_EVENT_STA_DISCONNECTED:
-            ESP_LOGI(TAG, "WiFi disconnected");
-            ESP_LOGI(TAG, "WiFi attempt to reconnect");
-            esp_wifi_connect();
-            break;
-
-        default:
-            ESP_LOGW(TAG, "unhandled WiFi event id: %ld \n", event_id);
-            break;
-        }
-
-    else if (event_base == IP_EVENT)
-
-        switch (event_id)
-        {
-        case IP_EVENT_STA_GOT_IP:
-            ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-            ESP_LOGI(TAG, "Got IP address: " IPSTR, IP2STR(&event->ip_info.ip));
-            WiFiReady = true;
-            break;
-
-        default:
-            ESP_LOGW(TAG, "unhandled IP event id: %ld \n", event_id);
-            break;
-        }
-
     else
-        ESP_LOGW(TAG, "unhandled event base and event id: %s %ld \n", event_base, event_id);
+    {
+        ESP_LOGE(TAG, "Error: esp_http_client_perform failed with error code %d", err);
+        PWSWeather_unknown_error = true;
+    };
+
+    esp_http_client_close(HTTP_client);   // close the connection
+    esp_http_client_cleanup(HTTP_client); // clean up the client
+    vTaskDelay(20 / portTICK_PERIOD_MS);
 }
 
-// init wifi as sta and set power save mode
-static void start_wifi(void)
+void publish_readings_to_PWSWeather()
 {
 
-    // This subroutine starts the WiFi.
-    // Once the WiFi event handler see that the WiFi has been connected and an IP address has been assigned
-    // it will call the subroutine to publish the readings
+    // if the external switch is in the on position, publish to PWSWeather
+    bool publish_to_pwsweather = (gpio_get_level(GENERAL_USER_SETTINGS_EXTERNAL_SWITCH_GPIO_PIN) == 0);
+    ESP_LOGI(TAG, "publish via PWSWeather is switched %s", publish_to_pwsweather ? "on" : "off");
+
+    if (publish_to_pwsweather)
+        publish_readings_to_PWSWeather_now();
+}
+
+static const char *itwt_probe_status_to_str(wifi_itwt_probe_status_t status)
+{
+    switch (status)
+    {
+    case ITWT_PROBE_FAIL:
+        return "itwt probe fail";
+    case ITWT_PROBE_SUCCESS:
+        return "itwt probe success";
+    case ITWT_PROBE_TIMEOUT:
+        return "itwt probe timeout";
+    case ITWT_PROBE_STA_DISCONNECTED:
+        return "itwt probe sta disconnected";
+    default:
+        return "itwt probe unknown status";
+    }
+}
+
+static void WiFi_start_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "Wi-Fi started");
+    ESP_LOGI(TAG, "Connecting to %s", SECRET_USER_SETTINGS_SSID);
+    esp_wifi_connect();
+}
+
+static void WiFi_connected_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "Wi-Fi connected");
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+}
+
+static void WiFi_disconnect_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    WiFi_is_connected = false;
+
+    ESP_LOGI(TAG, "Wi-Fi disconnected, reconnecting");
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+
+    xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+    ESP_ERROR_CHECK(esp_wifi_connect());
+}
+
+static void setup_WIFI6_targeted_wake_time()
+{
+
+    // if the Wi-Fi connection supports it, setup Wi-Fi 6 targeted wait time
+
+    wifi_phy_mode_t WiFiMode;
+
+    if (esp_wifi_sta_get_negotiated_phymode(&WiFiMode) == ESP_OK)
+    {
+        switch (WiFiMode)
+        {
+        case WIFI_PHY_MODE_HE20:
+
+            // this is ideally what we want as it allows the Wi-Fi connection to be preserved into the next cycle
+
+            ESP_LOGI(TAG, "802.11ax HE20");
+
+            // setup a trigger-based announce individual TWT agreement
+            wifi_config_t sta_cfg = {
+                0,
+            };
+
+            esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+
+            esp_err_t err = ESP_OK;
+            int flow_id = 0;
+            err = esp_wifi_sta_itwt_setup(TWT_REQUEST, ITWT_TRIGGER_ENABLED, ITWT_ANNOUNCED, ITWT_MIN_WAKE_DURATION,
+                                          GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_EXPN, GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_MANT, &flow_id);
+
+            if (err == ESP_OK)
+                ESP_LOGI(TAG, "Wi-Fi 6 Targeted Wake Time setup succeeded!");
+            else
+                ESP_LOGE(TAG, "Wi-Fi 6 Targeted Wake Time setup failed, err:0x%x", err);
+
+            WiFi6_TWT_setup_successfully = true;
+
+            break;
+
+        case WIFI_PHY_MODE_11B:
+            ESP_LOGI(TAG, "802.11b");
+            break;
+
+        case WIFI_PHY_MODE_11G:
+            ESP_LOGI(TAG, "802.11g");
+            break;
+
+        case WIFI_PHY_MODE_LR:
+            ESP_LOGI(TAG, "Low rate");
+            break;
+
+        case WIFI_PHY_MODE_HT20:
+            ESP_LOGI(TAG, "HT20");
+            break;
+
+        case WIFI_PHY_MODE_HT40:
+            ESP_LOGI(TAG, "HT40");
+            break;
+
+        default:
+            ESP_LOGE(TAG, "unknown Wi-Fi mode");
+            break;
+        }
+    }
+    else
+        ESP_LOGE(TAG, "failed to get Wi-Fi mode");
+
+    if (!WiFi6_TWT_setup_successfully)
+        ESP_LOGW(TAG, "Wi-Fi 6 targeted wake time could not be set up");
+
+    Light_sleep_enabled = WiFi6_TWT_setup_successfully;
+};
+
+static void got_ip_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    ESP_LOGI(TAG, "Got IP address: " IPSTR, IP2STR(&event->ip_info.ip));
+
+    xEventGroupClearBits(wifi_event_group, DISCONNECTED_BIT);
+    xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+
+    setup_WIFI6_targeted_wake_time();
+
+    WiFi_is_connected = true;
+}
+
+static void WiFi_beacon_timeout_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    ESP_LOGE(TAG, "Beacon timeout");
+}
+
+static void WiFi6_itwt_setup_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    wifi_event_sta_itwt_setup_t *setup = (wifi_event_sta_itwt_setup_t *)event_data;
+    if (setup->setup_cmd == TWT_ACCEPT)
+    {
+        /* TWT Wake Interval = TWT Wake Interval Mantissa * (2 ^ TWT Wake Interval Exponent) */
+        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>flow_id:%d, %s, %s, wake_dura:%d, wake_invl_e:%d, wake_invl_m:%d", setup->flow_id,
+                 setup->trigger ? "trigger-enabled" : "non-trigger-enabled", setup->flow_type ? "unannounced" : "announced",
+                 setup->min_wake_dura, setup->wake_invl_expn, setup->wake_invl_mant);
+        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>wake duration:%d us, service period:%d us", setup->min_wake_dura << 8, setup->wake_invl_mant << setup->wake_invl_expn);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "<WIFI_EVENT_ITWT_SETUP>unexpected setup command:%d", setup->setup_cmd);
+    }
+}
+
+static void WiFi6_itwt_teardown_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    wifi_event_sta_itwt_teardown_t *teardown = (wifi_event_sta_itwt_teardown_t *)event_data;
+    ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_TEARDOWN>flow_id %d%s", teardown->flow_id, (teardown->flow_id == 8) ? "(all twt)" : "");
+}
+
+static void WiFi6_itwt_suspend_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    wifi_event_sta_itwt_suspend_t *suspend = (wifi_event_sta_itwt_suspend_t *)event_data;
+    ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SUSPEND>status:%d, flow_id_bitmap:0x%x, actual_suspend_time_ms:[%lu %lu %lu %lu %lu %lu %lu %lu]",
+             suspend->status, suspend->flow_id_bitmap,
+             suspend->actual_suspend_time_ms[0], suspend->actual_suspend_time_ms[1], suspend->actual_suspend_time_ms[2], suspend->actual_suspend_time_ms[3],
+             suspend->actual_suspend_time_ms[4], suspend->actual_suspend_time_ms[5], suspend->actual_suspend_time_ms[6], suspend->actual_suspend_time_ms[7]);
+}
+
+static void WiFi6_itwt_probe_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    wifi_event_sta_itwt_probe_t *probe = (wifi_event_sta_itwt_probe_t *)event_data;
+    ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_PROBE>status:%s, reason:0x%x", itwt_probe_status_to_str(probe->status), probe->reason);
+}
+
+/*
+
+not currently in use
+
+static void set_static_ip(esp_netif_t *netif)
+{
+#if GENERAL_USER_SETTINGS_ENABLE_STATIC_IP
+    if (esp_netif_dhcpc_stop(netif) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to stop dhcp client");
+        return;
+    }
+    esp_netif_ip_info_t ip;
+    memset(&ip, 0, sizeof(esp_netif_ip_info_t));
+    ip.ip.addr = ipaddr_addr(GENERAL_USER_SETTINGS_STATIC_IP_ADDR);
+    ip.netmask.addr = ipaddr_addr(GENERAL_USER_SETTINGS_STATIC_IP_NETMASK_ADDR);
+    ip.gw.addr = ipaddr_addr(GENERAL_USER_SETTINGS_STATIC_IP_GW_ADDR);
+    if (esp_netif_set_ip_info(netif, &ip) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to set ip info");
+        return;
+    }
+    ESP_LOGI(TAG, "Success setting static ip: %s, netmask: %s, gw: %s",
+             GENERAL_USER_SETTINGS_STATIC_IP_ADDR, GENERAL_USER_SETTINGS_STATIC_IP_NETMASK_ADDR, GENERAL_USER_SETTINGS_STATIC_IP_GW_ADDR);
+#endif
+}
+*/
+
+static void start_wifi()
+{
+    // This subroutine starts the Wi-Fi
+    // It will make a Wi-Fi 6 connection if possible
+    // However, once the Wi-Fi event handler has been connected and an IP address has been assigned
+    // the program will determine if a Wi-Fi 6 connection was actually made
 
     ESP_ERROR_CHECK(esp_netif_init());
+    wifi_event_group = xEventGroupCreate();
+
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
-    assert(sta_netif);
+    netif_sta = esp_netif_create_default_wifi_sta();
+    assert(netif_sta);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
+    // WiFi events
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_START, &WiFi_start_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &WiFi_disconnect_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &WiFi_connected_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_BEACON_TIMEOUT, &WiFi_beacon_timeout_handler, NULL, NULL));
+
+    // WiFi 6 ITWT events
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_ITWT_SETUP, &WiFi6_itwt_setup_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_ITWT_TEARDOWN, &WiFi6_itwt_teardown_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_ITWT_SUSPEND, &WiFi6_itwt_suspend_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_ITWT_PROBE, &WiFi6_itwt_probe_handler, NULL, NULL));
+
+    // IP event
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &got_ip_handler, NULL, NULL));
 
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = DEFAULT_SSID,
-            .password = DEFAULT_PWD,
-            .listen_interval = DEFAULT_LISTEN_INTERVAL,
+            .ssid = SECRET_USER_SETTINGS_SSID,
+            .password = SECRET_USER_SETTINGS_PASSWORD,
+            .listen_interval = WIFI_LISTEN_INTERVAL,
             .pmf_cfg = {
                 .capable = true,
                 .required = false},
@@ -518,11 +732,145 @@ static void start_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 
-    // ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX));
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+
+    // esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11AX);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX);
+
+    esp_wifi_set_country_code(GENERAL_USER_SETTINGS_WIFI_COUNTRY_CODE, true);
+
+    // testing here (I've tried all of these, plus commenting them all out - none help with the disconnect issue): 
+    esp_wifi_set_ps(WIFI_PS_MAX_MODEM); 
+    // esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    // esp_wifi_set_ps(WIFI_PS_NONE);
+
+    // set_static_ip(netif_sta); // helpful if publishing to mqtt only; if publishing to pwsweather then comment this line // additional code for this is commented out above
 
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_STA, DEFAULT_BEACON_TIMEOUT));
-    esp_wifi_set_ps(DEFAULT_PS_MODE); // set power saving mode
+
+    uint16_t probe_timeout = 65535;
+    ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_STA, probe_timeout));
+
+#if CONFIG_ESP_WIFI_ENABLE_WIFI_RX_STATS
+#if CONFIG_ESP_WIFI_ENABLE_WIFI_RX_MU_STATS
+    esp_wifi_enable_rx_statistics(true, true);
+#else
+    esp_wifi_enable_rx_statistics(true, false);
+#endif
+#endif
+#if CONFIG_ESP_WIFI_ENABLE_WIFI_TX_STATS
+    esp_wifi_enable_tx_statistics(ESP_WIFI_ACI_VO, true);
+    esp_wifi_enable_tx_statistics(ESP_WIFI_ACI_BE, true);
+#endif
+
+    register_system();
+    register_wifi_itwt();
+    register_wifi_stats();
+}
+
+void turn_on_Wifi()
+{
+
+    ESP_LOGI(TAG, "Turn on Wi-Fi");
+
+    start_wifi();
+
+    // wait for wifi to connect
+    int64_t timeout = esp_timer_get_time() + GENERAL_USER_SETTINGS_WIFI_CONNECT_TIMEOUT_PERIOD * 1000000;
+    while (!WiFi_is_connected && (esp_timer_get_time() < timeout))
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+
+    if (!WiFi_is_connected)
+        ESP_LOGE(TAG, "Timed out trying to connect to Wi-Fi");
+};
+
+void goto_sleep()
+{
+
+    // Please see the 'Important Note' at top of this file for more information on the following work arounds
+
+    static int cycle = 1;
+    int64_t cycle_time;
+
+    bool use_a_delay_instead_of_sleep;
+
+    if (WORKAROUND == 0)
+        use_a_delay_instead_of_sleep = false;
+    else if (WORKAROUND == 1)
+        Light_sleep_enabled = false;
+    else
+        use_a_delay_instead_of_sleep = true;
+
+    // if we have had a relatively serious problem force deep sleep rather than light sleep
+    // this will effectively reset the esp32
+    if (!WiFi_is_connected || !BME680_readings_are_reasonable || MQTT_unknown_error || PWSWeather_unknown_error)
+        Light_sleep_enabled = false;
+
+    // report processing time for this cycle (processing time excludes sleep time)
+    if (cycle == 1)
+    {
+        cycle_time = esp_timer_get_time() - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS * 1000000;
+        ESP_LOGW(TAG, "initial startup and cycle %d processing time: %f seconds", cycle++, (float)((float)cycle_time / (float)1000000));
+    }
+    else
+    {
+        cycle_time = esp_timer_get_time() - cycle_start_time;
+        ESP_LOGW(TAG, "cycle %d processing time: %f seconds", cycle++, (float)((float)cycle_time / (float)1000000));
+    };
+
+    if (Light_sleep_enabled)
+    {
+
+        if (use_a_delay_instead_of_sleep)
+        {
+            if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
+            {
+                ESP_LOGI(TAG, "begin delay for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+                vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
+            };
+
+            const uint64_t convert_from_microseconds_to_milliseconds_by_division = 1000;
+            vTaskDelay(((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 * 1000000) - cycle_time) / convert_from_microseconds_to_milliseconds_by_division / portTICK_PERIOD_MS);
+        }
+        else
+        {
+
+            if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
+            {
+                ESP_LOGI(TAG, "begin light sleep for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+                vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
+            };
+
+            esp_sleep_enable_timer_wakeup((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 * 1000000) - cycle_time);
+            esp_light_sleep_start();
+        }
+    }
+    else
+    {
+        if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
+        {
+            ESP_LOGW(TAG, "begin deep sleep for %d seconds\n", (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS));
+            vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
+        };
+        esp_sleep_enable_timer_wakeup(((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS) * 1000000) - cycle_time);
+        esp_deep_sleep_start();
+    }
+
+    ESP_LOGI(TAG, "awake from sleep");
+}
+
+void saftety_sleep()
+{
+    // used to delay processing after a full boot/reboot
+    if (GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS > 0)
+    {
+        esp_sleep_enable_timer_wakeup((GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS * 1000000));
+        ESP_LOGI(TAG, "%d second safety sleep starting", GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS);
+        if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
+            vTaskDelay(20 / portTICK_PERIOD_MS);
+        esp_light_sleep_start();
+        ESP_LOGI(TAG, "safety sleep ended");
+    };
 }
 
 void initalize_non_volatile_storage()
@@ -537,158 +885,73 @@ void initalize_non_volatile_storage()
     ESP_ERROR_CHECK(ret);
 }
 
-void configure_power_management()
-{
-
-#if CONFIG_PM_ENABLE
-    // Configure dynamic frequency scaling:
-    // maximum and minimum frequencies are set in sdkconfig,
-    // automatic light sleep is enabled if tickless idle support is enabled.
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = CONFIG_EXAMPLE_MAX_CPU_FREQ_MHZ,
-        .min_freq_mhz = CONFIG_EXAMPLE_MIN_CPU_FREQ_MHZ,
-#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
-        .light_sleep_enable = true
-#endif
-    };
-    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-#endif // CONFIG_PM_ENABLE
-};
-
 void initialize_the_external_switch()
 {
+    // Initialize the external switch used to determine if the readings should be reported to PWSWeather.com
     gpio_config_t io_conf;
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = 1ULL << EXTERNAL_SWITCH_GPIO_PIN;
+    io_conf.pin_bit_mask = 1ULL << GENERAL_USER_SETTINGS_EXTERNAL_SWITCH_GPIO_PIN;
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io_conf);
 }
 
+void reset_the_cycle_start_time()
+{
+
+    cycle_start_time = esp_timer_get_time();
+}
+
+void restart_after_two_minutes()
+{
+    ESP_LOGE(TAG, "begin deep sleep for two minutes");
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+    esp_sleep_enable_timer_wakeup(2 * 60 * 1000000);
+    esp_deep_sleep_start();
+}
+
 void app_main(void)
 {
 
-    ESP_LOGI(TAG, "********************");
-    ESP_LOGI(TAG, "Weather Station v1.0");
+    ESP_LOGI(TAG, "\n************************\n* Weather Station v1.0 *\n************************");
+    ESP_LOGW(TAG, "Sleep time between cycles: %d seconds", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+    ESP_LOGW(TAG, "Safety sleep (at startup only): %d seconds", GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS);
 
-    // Initialize NVS
+    saftety_sleep();
+
     initalize_non_volatile_storage();
 
-    // configure power management
-    configure_power_management();
-
-    // Initialize the external switch used to determine if the readings taken should be reported to PWSWeather.com
     initialize_the_external_switch();
 
-    // Get the BME680 readings; this is done as a task so that it can be run in parallel with the starting of the Wifi
-    BME680_readings_are_valid = false;
-    xTaskCreate(get_bme680_readings, "GetReadings", 1024 * 2, NULL, 20, NULL);
+    turn_on_Wifi();
 
-    // start the WiFi and wait for it to connect; max wait time is one half the PUBLISHING_TIMEOUT_PERIOD
-    int64_t publishing_start_time = esp_timer_get_time();
-    int64_t timeout = +publishing_start_time + (PUBLISHING_TIMEOUT_PERIOD / 2) * 1000000;
-    WiFiReady = false;
-    start_wifi();
+    if (!WiFi_is_connected)
+        restart_after_two_minutes();
 
-    // wait for the readings to be taken and the wifi to connect
-    while (!BME680_readings_are_valid && (esp_timer_get_time() < timeout))
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // check if external switch is toggled on to report results to PWSWeather.com
-    bool publish_to_pwsweather = (gpio_get_level(EXTERNAL_SWITCH_GPIO_PIN) == 0);
-
-    while (!WiFiReady && (esp_timer_get_time() < timeout))
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // if the readings are valid and the WiFi is connected then
-    // publish the results via MQTT, and
-    // publish the results to PWSWeather.com (as required)
-
-    if (BME680_readings_are_valid)
+    while (true)
     {
-        if (WiFiReady)
+        // complete a cycle of:
+        //  getting the readings from the BME680
+        //  publishing the readings to MQTT
+        //  publishing the readings to PWSWeather.com
+        //  going to sleep
+
+        reset_the_cycle_start_time();
+
+        get_bme680_readings();
+
+        if (BME680_readings_are_reasonable)
         {
-            // publishing to PWSWeather usually takes longer than publishing to the MQTT Server
-            //
-            // the goal of the code below is to get the publishing jobs done as quickly as possible while at the same time smoothing
-            // out the power consumption (i.e. reducing the peak current draw level).
-            //
-            // so with this in mind:
-            //
-            // first, if required:
-            //
-            //    start a task to publish to PWSWeather
-            //    and then insert a short delay so the esp32 can concentrate on starting up the publishing to PWSWeather
-            //
-            // second,
-            //
-            //    start a parallel task to publish to MQTT (which  will likely complete well before the PWSWeather task)
-            //
-            // As the MQTT publishing can then be completed (in most cases) before the PWSWeather returns its results
-            // we are effectively using the wait time for PWSWeather to do all of the MQTT reporting.
-            //
-            // This has two advantages as noted above:
-            //  First, as the two publishing tasks run in parallel (as opposed to sequentially) the program can get to deep sleep sooner.
-            //  Second, as MQTT publishing task starts a couple seconds after the publishing to PWSWeather task, this program is effectively
-            //  flattening the power consumption curve by staggering their startup times (as both tasks are briefly power hungry when first started)
-            //  in my very limited testing, the two second delay dropped the peak power consumption point as much as a third
-
-            ESP_LOGI(TAG, "Publish via PWSWeather is switched %s", publish_to_pwsweather ? "on" : "off");
-
-            if (publish_to_pwsweather)
-            {
-                PWSWeather_Publishing_Done = false;
-                xTaskCreate(publish_readings_to_PWSWeather, "PWSWeather", 1024 * 8, NULL, 10, NULL);
-                //
-                // Add a short delay before starting a parallel task to publish via MQTT.
-                // As noted above, this will give the task publishing to PWSWeather.com time to get underway before the MQTT publishing starts.
-                //
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-            };
-
-            MQTT_Publishing_Done = false;
-            ESP_LOGI(TAG, "Publish via MQTT");
-            xTaskCreate(publish_readings_via_MQTT, "MQTT", 1024 * 2, NULL, 5, NULL);
-
-            // if they exist, wait for the two tasks above to complete.
-            // if they don't complete within the timeout period continue on towards deep sleep
-
-            // set a timeout period to get all the above publishing done
-            timeout = publishing_start_time + PUBLISHING_TIMEOUT_PERIOD * 1000000;
-
-            // wait until MQTT and PWSWeather are both done reporting or the time out period has elapsed (whichever comes first)
-            // note: MQTT is not done reporting when its started tasks ends, it is done when its event handler confirms its publishing done
-
-            ESP_LOGI(TAG, "waiting on MQTT");
-            while (!MQTT_Publishing_Done && (esp_timer_get_time() < timeout))
-                vTaskDelay(200 / portTICK_PERIOD_MS);
-            ESP_LOGI(TAG, "MQTT done");
-
-            if (publish_to_pwsweather)
-            {
-                ESP_LOGI(TAG, "waiting on PWSWeather");
-                while (!PWSWeather_Publishing_Done && (esp_timer_get_time() < timeout))
-                    vTaskDelay(100 / portTICK_PERIOD_MS);
-                ESP_LOGI(TAG, "PWSWeather done");
-            };
+            publish_readings_via_MQTT();
+            publish_readings_to_PWSWeather();
         }
         else
         {
-            ESP_LOGI(TAG, "Couldn't connect to WiFi");
-        }
+            ESP_LOGE(TAG, "couldn't get a valid reading from the BME680; please check the wiring;");
+            restart_after_two_minutes();
+        };
+
+        goto_sleep();
     }
-    else
-    {
-        ESP_LOGI(TAG, "Couldn't get valid BME680 readings");
-    };
-
-    // Report run time
-    float runtime_in_seconds = (float)esp_timer_get_time() / (float)1000000;
-    ESP_LOGI(TAG, "run time: %f seconds", runtime_in_seconds);
-
-    // Put the program into deep sleep
-    ESP_LOGI(TAG, "Go to sleep");
-    esp_sleep_enable_timer_wakeup(MINUTES_BETWEEN_READINGS * 60 * 1000000 - esp_timer_get_time());
-    esp_deep_sleep_start();
 }
