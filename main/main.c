@@ -4,7 +4,12 @@
 // License MIT
 // open source project: https://github.com/roblatour/WeatherStation
 
-// Running on an esp32-c6 for Wifi 6 (802.11ax) using Target Wake Time to reduce power consumption
+// Running on an esp32-c6 for Wifi 6 (802.11ax) using either:
+//  - deep sleep, or
+//  - automatic light sleep with WiFi 6
+//  to reduce power consumption.
+//
+// For more information please see the general_user_settings.h file
 
 #include "sdkconfig.h"
 #include "general_user_settings.h"
@@ -94,7 +99,7 @@ volatile enum Wifi_status WiFi_current_status;
 volatile bool WiFi_is_connected = false;
 volatile bool WiFi6_TWT_setup_successfully = false;
 volatile bool MQTT_is_connected = false;
-volatile bool Light_sleep_enabled = false;
+volatile bool light_sleep_enabled = false;
 
 volatile int MQTT_published_messages;
 volatile bool MQTT_publishing_in_progress;
@@ -103,6 +108,8 @@ volatile bool MQTT_unknown_error = false;
 volatile bool PWSWeather_Publishing_Done;
 volatile bool PWSWeather_unknown_error = false;
 
+volatile bool going_to_sleep = false;
+
 volatile esp_mqtt_client_handle_t MQTT_client;
 
 const int CONNECTED_BIT = BIT0;
@@ -110,7 +117,43 @@ const int DISCONNECTED_BIT = BIT1;
 esp_netif_t *netif_sta = NULL;
 EventGroupHandle_t wifi_event_group;
 
-volatile int64_t cycle_start_time;
+volatile int64_t cycle_start_time = 0;
+
+esp_pm_config_t power_management_disabled;
+esp_pm_config_t power_management_enabled;
+
+void initialize_power_management()
+{
+
+    // power management is only needed when the program will use automatic light sleep
+
+    if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 1)
+    {
+
+        // get the current power management configuration and save it as a baseline for when power save mode is disabled
+        esp_pm_get_configuration(&power_management_disabled);
+
+        // set the power management configuration for when the power save mode is enabled
+#if CONFIG_PM_ENABLE
+        esp_pm_config_t power_management_when_enabled = {
+            .max_freq_mhz = 160, // ref: the esp32-c6 datasheet https://www.espressif.com/sites/default/files/documentation/esp32-c6-wroom-1_wroom-1u_datasheet_en.pdf
+            .min_freq_mhz = 10,  // ref: Espressive's itwt example: https://github.com/espressif/esp-idf/tree/903af13e847cd301e476d8b16b4ee1c21b30b5c6/examples/wifi/itwt
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+            .light_sleep_enable = true
+#endif
+        };
+        power_management_enabled = power_management_when_enabled;
+#endif
+    }
+}
+
+void enable_power_save_mode(bool turn_on)
+{
+    if (turn_on)
+        ESP_ERROR_CHECK(esp_pm_configure(&power_management_enabled));
+    else
+        ESP_ERROR_CHECK(esp_pm_configure(&power_management_disabled));
+}
 
 void MQTT_publish_a_reading(const char *subtopic, float value)
 {
@@ -309,13 +352,9 @@ void get_bme680_readings()
 
     // release the I2C bus
     ESP_ERROR_CHECK(i2cdev_done());
-    vTaskDelay(20 / portTICK_PERIOD_MS);
 
-    if ((LOG_LOCAL_LEVEL != ESP_LOG_NONE) && (BME680_readings_are_reasonable))
-    {
-        ESP_LOGI(TAG, "readings: Temperature: %.2f °C   Humidity: %.2f %%   Pressure: %.2f hPa", temperature, humidity, pressure);
-        vTaskDelay(20 / portTICK_PERIOD_MS);
-    }
+    // The readings will be displayed later when published via MQTT, so unless you want to really want to see them here the following line can be commented out:
+    // ESP_LOGI(TAG, "readings: Temperature: %.2f °C   Humidity: %.2f %%   Pressure: %.2f hPa", temperature, humidity, pressure);
 }
 
 void publish_readings_via_MQTT()
@@ -337,6 +376,8 @@ void publish_readings_via_MQTT()
     MQTT_publishing_in_progress = true;
 
     int64_t timeout = esp_timer_get_time() + GENERAL_USER_SETTINGS_MQTT_PUBLISHING_TIMEOUT_PERIOD * 1000000;
+
+    // multiple attempts to connect to MQTT will be made incase the network connection has failed within the reporting period and needs to be re-established
 
     int attempts = 0;
     const int max_attempts = 3;
@@ -366,8 +407,6 @@ void publish_readings_via_MQTT()
 
             if (MQTT_is_connected)
             {
-
-                ESP_LOGI(TAG, "MQTT connected (attempt %d of %d)", attempts, max_attempts);
 
                 if (MQTT_publishing_in_progress)
                     MQTT_publish_all_readings();
@@ -509,24 +548,26 @@ static void WiFi_start_handler(void *arg, esp_event_base_t event_base, int32_t e
 {
     ESP_LOGI(TAG, "Wi-Fi started");
     ESP_LOGI(TAG, "Connecting to %s", SECRET_USER_SETTINGS_SSID);
-    esp_wifi_connect();
+    ESP_ERROR_CHECK(esp_wifi_connect());
 }
 
 static void WiFi_connected_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     ESP_LOGI(TAG, "Wi-Fi connected");
-    vTaskDelay(20 / portTICK_PERIOD_MS);
 }
 
 static void WiFi_disconnect_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     WiFi_is_connected = false;
 
-    ESP_LOGI(TAG, "Wi-Fi disconnected, reconnecting");
-    vTaskDelay(20 / portTICK_PERIOD_MS);
-
-    xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    if (going_to_sleep)
+        ESP_LOGI(TAG, "Wi-Fi disconnected");
+    else
+    {
+        ESP_LOGI(TAG, "Wi-Fi disconnected, reconnecting");
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    }
 }
 
 static void setup_WIFI6_targeted_wake_time()
@@ -598,7 +639,7 @@ static void setup_WIFI6_targeted_wake_time()
     if (!WiFi6_TWT_setup_successfully)
         ESP_LOGW(TAG, "Wi-Fi 6 targeted wake time could not be set up");
 
-    Light_sleep_enabled = WiFi6_TWT_setup_successfully;
+    light_sleep_enabled = WiFi6_TWT_setup_successfully;
 };
 
 static void got_ip_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
@@ -739,8 +780,7 @@ static void start_wifi()
 
     esp_wifi_set_country_code(GENERAL_USER_SETTINGS_WIFI_COUNTRY_CODE, true);
 
-    // testing here (I've tried all of these, plus commenting them all out - none help with the disconnect issue): 
-    esp_wifi_set_ps(WIFI_PS_MAX_MODEM); 
+    esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
     // esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     // esp_wifi_set_ps(WIFI_PS_NONE);
 
@@ -791,86 +831,104 @@ void goto_sleep()
 
     static int cycle = 1;
     int64_t cycle_time;
-
-    bool use_a_delay_instead_of_sleep;
-
-    if (WORKAROUND == 0)
-        use_a_delay_instead_of_sleep = false;
-    else if (WORKAROUND == 1)
-        Light_sleep_enabled = false;
-    else
-        use_a_delay_instead_of_sleep = true;
+    int64_t sleep_time;
 
     // if we have had a relatively serious problem force deep sleep rather than light sleep
     // this will effectively reset the esp32
     if (!WiFi_is_connected || !BME680_readings_are_reasonable || MQTT_unknown_error || PWSWeather_unknown_error)
-        Light_sleep_enabled = false;
+        light_sleep_enabled = false;
 
     // report processing time for this cycle (processing time excludes sleep time)
+
+    cycle_time = esp_timer_get_time() - cycle_start_time;
+
     if (cycle == 1)
-    {
-        cycle_time = esp_timer_get_time() - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS * 1000000;
         ESP_LOGW(TAG, "initial startup and cycle %d processing time: %f seconds", cycle++, (float)((float)cycle_time / (float)1000000));
-    }
     else
-    {
-        cycle_time = esp_timer_get_time() - cycle_start_time;
         ESP_LOGW(TAG, "cycle %d processing time: %f seconds", cycle++, (float)((float)cycle_time / (float)1000000));
-    };
 
-    if (Light_sleep_enabled)
+    if (light_sleep_enabled && (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 1))
+    // automatic light sleep approach
     {
 
-        if (use_a_delay_instead_of_sleep)
+        if (cycle_time < ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000))
         {
-            if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
-            {
-                ESP_LOGI(TAG, "begin delay for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
-                vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
-            };
 
+            ESP_LOGI(TAG, "begin automatic light sleep for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+
+            enable_power_save_mode(true);
+
+            // with automatic light sleep we don't actually call light sleep
+            // rather we delay for the required time
+            // and power management seeing the delay kicks in automatic light sleep
             const uint64_t convert_from_microseconds_to_milliseconds_by_division = 1000;
             vTaskDelay(((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 * 1000000) - cycle_time) / convert_from_microseconds_to_milliseconds_by_division / portTICK_PERIOD_MS);
+
+            enable_power_save_mode(false);
+        }
+        else
+            ESP_LOGI(TAG, "skipping automatic light sleep (already running late for the next cycle)");
+    }
+
+    else if (light_sleep_enabled && (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 2))
+    // manual light sleep approach
+    {
+
+        if (cycle_time < ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000))
+        {
+            going_to_sleep = true;
+
+            ESP_ERROR_CHECK(esp_wifi_stop()); // turn off wifi to save power
+
+            while (WiFi_is_connected)
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+
+            ESP_LOGI(TAG, "begin manual light sleep for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+
+            vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional if you want to see the above log entry written)
+
+            sleep_time = ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000) - cycle_time;
+            esp_sleep_enable_timer_wakeup(sleep_time);
+
+            esp_light_sleep_start();
+
+            going_to_sleep = false;
+
+            ESP_ERROR_CHECK(esp_wifi_start()); // turn wifi back on
+        }
+        else
+            ESP_LOGI(TAG, "skipping manual light sleep (already running late for the next cycle)");
+    }
+
+    else
+    // deep sleep approach
+    {
+
+        if (cycle_time < ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000))
+        {
+
+            if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 0)
+                ESP_LOGI(TAG, "begin deep sleep for %d seconds\n", (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60)); // show as info as using deep sleep was the user's choice
+            else
+                ESP_LOGW(TAG, "begin deep sleep for %d seconds\n", (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60)); // show as warning as using deep sleep was not the user's choice
+
+            vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional if you want to see the above log entry written)
+
+            esp_sleep_enable_timer_wakeup(((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000) - cycle_time);
+            esp_deep_sleep_start();
         }
         else
         {
-
-            if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
-            {
-                ESP_LOGI(TAG, "begin light sleep for %d seconds\n", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
-                vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
-            };
-
-            esp_sleep_enable_timer_wakeup((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 * 1000000) - cycle_time);
-            esp_light_sleep_start();
+            ESP_LOGI(TAG, "skipping deep sleep (already running late for the next cycle); restarting now");
+            vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional if you want to see the above log entry written)
+            esp_restart();
         }
     }
-    else
-    {
-        if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
-        {
-            ESP_LOGW(TAG, "begin deep sleep for %d seconds\n", (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS));
-            vTaskDelay(20 / portTICK_PERIOD_MS); // provide some time to finalize writing to the log (this is not optional)
-        };
-        esp_sleep_enable_timer_wakeup(((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60 - GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS) * 1000000) - cycle_time);
-        esp_deep_sleep_start();
-    }
+
+    // reset the cycle start time
+    cycle_start_time = esp_timer_get_time();
 
     ESP_LOGI(TAG, "awake from sleep");
-}
-
-void saftety_sleep()
-{
-    // used to delay processing after a full boot/reboot
-    if (GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS > 0)
-    {
-        esp_sleep_enable_timer_wakeup((GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS * 1000000));
-        ESP_LOGI(TAG, "%d second safety sleep starting", GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS);
-        if (LOG_LOCAL_LEVEL != ESP_LOG_NONE)
-            vTaskDelay(20 / portTICK_PERIOD_MS);
-        esp_light_sleep_start();
-        ESP_LOGI(TAG, "safety sleep ended");
-    };
 }
 
 void initalize_non_volatile_storage()
@@ -897,30 +955,67 @@ void initialize_the_external_switch()
     gpio_config(&io_conf);
 }
 
-void reset_the_cycle_start_time()
-{
-
-    cycle_start_time = esp_timer_get_time();
-}
-
 void restart_after_two_minutes()
 {
-    ESP_LOGE(TAG, "begin deep sleep for two minutes");
+    ESP_LOGE(TAG, "delaying for two minutes and then restarting");
     vTaskDelay(20 / portTICK_PERIOD_MS);
     esp_sleep_enable_timer_wakeup(2 * 60 * 1000000);
     esp_deep_sleep_start();
 }
 
+void startup_validations_and_displays()
+{
+
+    ESP_LOGI(TAG, "\n\n\n************************\n* Weather Station v1.1 *\n************************");
+
+#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
+    bool tickless_idle_enabled = true;
+#else
+    bool tickless_idle_enabled = false;
+#endif
+
+    if (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES <= 0)
+    {
+        ESP_LOGE(TAG, "invalid reporting frequency");
+        restart_after_two_minutes();
+    };
+
+    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH < 0) || (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH > 2))
+    {
+        ESP_LOGE(TAG, "invalid sleep approach");
+        restart_after_two_minutes();
+    };
+
+    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 1) && !tickless_idle_enabled)
+    {
+        ESP_LOGE(TAG, "automatic light sleep requires tickless idle to be enabled");
+        restart_after_two_minutes();
+    }
+
+    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 2) && tickless_idle_enabled)
+    {
+        ESP_LOGE(TAG, "manual light sleep requires tickless idle to be disabled");
+        restart_after_two_minutes();
+    };
+
+    if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 0)
+        ESP_LOGI(TAG, "sleep approach: deep sleep");
+    else if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 1)
+        ESP_LOGI(TAG, "sleep approach: automatic light sleep");
+    else if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 2)
+        ESP_LOGI(TAG, "sleep approach: manual light sleep");
+
+    ESP_LOGI(TAG, "sleep time between cycles: %d seconds", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
+}
+
 void app_main(void)
 {
 
-    ESP_LOGI(TAG, "\n************************\n* Weather Station v1.0 *\n************************");
-    ESP_LOGW(TAG, "Sleep time between cycles: %d seconds", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
-    ESP_LOGW(TAG, "Safety sleep (at startup only): %d seconds", GENERAL_USER_SETTINGS_SAFETY_SLEEP_IN_SECONDS);
-
-    saftety_sleep();
+    startup_validations_and_displays();
 
     initalize_non_volatile_storage();
+
+    initialize_power_management();
 
     initialize_the_external_switch();
 
@@ -931,14 +1026,6 @@ void app_main(void)
 
     while (true)
     {
-        // complete a cycle of:
-        //  getting the readings from the BME680
-        //  publishing the readings to MQTT
-        //  publishing the readings to PWSWeather.com
-        //  going to sleep
-
-        reset_the_cycle_start_time();
-
         get_bme680_readings();
 
         if (BME680_readings_are_reasonable)

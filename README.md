@@ -1,24 +1,20 @@
 # WeatherStation 
-  using an ESP32-C6, WiFi 6, BME680 sensor, publishing to MQTT and optionally PWSWeather.com
+Using an ESP32-C6, WiFi 6, and a BME680 sensor
+Publishing to MQTT and optionally PWSWeather.com
 
 Open source Weather Station by Rob Latour, 2023, MIT license
 
 # Featuring
 
-- a power conscious hardware and software design for use within a solar powered project: 
-  - 2.4GHz WiFi 6 connectivity with Targeted Wake Time (TWT) using an espressif ESP32-C6 dev kit, and a
+- a power conscious hardware and software design for use within a solar powered project 
+  - 2.4GHz WiFi 6 connectivity with Targeted Wake Time (TWT) using an Espressif ESP32-C6 Devkit C-1, and a
   - DFRobot Solar Power Manager 5V
   
 - temperature, pressure and humidity using a BME680 sensor
 
 - an external switch to toggle on or off reporting to PWSWeather
   which is handy if moving the weather station indoors for whatever reason
-  (uses an internal pullup resistor (so a resistor external to the ESP32-C6 dev kit isn't required)
-
-Note: at the time of release there is a known issue that a WiFi 6 does not always stay connected while in light sleep, especially for light sleep periods over three minutes
-      this issue seems to be more pronounced the longer the program is in light sleep, and it has been raised here: https://github.com/espressif/esp-idf/issues/11550
-      the code offers two optional work-arounds for the above issue  
-      For more information, please see the 'Power Consumption' section below
+  (uses an internal pullup resistor so a resistor external to the ESP32-C6 isn't required)
 
 # Reporting to
 
@@ -30,22 +26,58 @@ Note: at the time of release there is a known issue that a WiFi 6 does not alway
 
 # Build environment
 
-Built using release version 5.1 Espressif's ESP-IDF with the Espressif Visual Studio Code extention version 1.6.2
+Built using release version 5.1 Espressif's ESP-IDF with the Espressif Visual Studio Code extention version 1.6.3
 
 Note: at the time of ESP-IDF release 5.1 is not yet a final stable release, but it is far enough along to fully support this project
 
 # Power consumption
 
-The power consumption varies depending on the work-around option chosen:
-0. with no work around, the program goes into light sleep between reporting cycles.  With this when it awakes it does not need to reboot, but it does need to reconnect to Wi-Fi
-1. work-around 1 the program uses deep sleep in place of light sleep between reporting cycles.  While deep sleep uses less power than light sleep, the need to reboot and reconnect for each reporting cycle is less than ideal 
-2. work-around 2 uses a delay in place of light sleep.  With this the Wi-Fi connection is preserved between reporting cycles, and the program does not need to reboot or reconnect after each reporting cycle.  However, it uses much more power in between cycles.
-	
+Power consumption varies depending on the approach chosen for sleep between reporting periods:
+
+  The first and most straight forward approach to save power is to have program go into deep sleep in between readings.
+  The advantage of this is that the esp32 will use as little power between readings as is possible.
+  The disadvantage of this is that it will need to reboot and reconnect at the start of every cycle.
+  Accordingly, this is likely the best option for longer reporting periods.
+
+  There are also two alternative approaches to deep sleep, these are manual and automatic light sleep. 
+
+  Manual light sleep:
+    With this option, the esp32 will not preserve the Wi-Fi 6 connection between readings, rather it will reconnect to Wi-Fi when it is time to publish the data.
+    The advantage of manual light sleep is that the device will not need to reboot as is required for awaking from deep sleep.
+    The disadvantages of this are that the Wi-Fi will need to be reconnected when it is time to publish the data, and the device will use more power between readings than deep sleep. ???
+
+  Automated light sleep:
+    Automatic light sleep allows the Wi-Fi 6 connection to be preserve between readings.
+    The advantage of preserving the Wi-Fi 6 connection is that the device can publish a new set of readings without needing to reboot or reconnect. 
+    Also, automatic light sleep allows the use of power management, which reduces the power consumption durning sleep but not to the degree that it is reduced by manual light sleep as with automatic light sleep the esp32 continues to respond to Wi-Fi beacons. 
+    The disadvantage of preserving the Wi-Fi 6 connection is that the device will use more power between readings than when in either manual light sleep or deep sleep.
+    Accordingly, this is likely the best option for shorter reporting periods.
+
+Here are some average power consumption results: 
+
+  Reporting Period   Deep Sleep    Automatic Light Sleep   Manual Light Sleep
+     5 minutes        2.5  mA            2.22 mA                2.57 mA 
+    10 minutes        2.05 mA            2.18 mA                2.72 mA 
+    15 minutes        1.84 mA            2.09 mA                2.79 mA 
+
+The above findings are based on limited testing, and in all cases:
+
+  connecting to a Wi-Fi 6 access point
+
+  only publishing to a MQTT server on an internal network  
+  (as publishing to PWSWeather.com introduces variability related to the site's response time for each individual request)
+
+  using esp_wifi_set_ps(WIFI_PS_MAX_MODEM)
+
+  having removed the power LED on the ESP32-C6 (which saved about .3 mA)
+
 # The code
 
 The code includes two companion files in the main directory:
 - general_user_settings.h  used to change various settings, such as the number of minutes between readings
-- secret_user_settings.h   used to change 'secret' settings, such as your WiFi password
+- secret_user_settings.h   used to change various secret settings, such as your WiFi password
 	
-Uses a I2C and BME680 driver from this Espressif ESP-IDF component library https://github.com/UncleRus/esp-idf-lib . 
+Uses a I2C and BME680 driver from this Espressif ESP-IDF component library https://github.com/UncleRus/esp-idf-lib  
 The BME680 driver was forked from the original driver by Gunar Schorcht https://github.com/gschorcht/bme680-esp-idf
+
+Donations welcome https://rlatour.com
