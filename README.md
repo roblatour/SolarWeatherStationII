@@ -78,7 +78,11 @@ The code includes two companion files in the main directory:
 - general_user_settings.h  used to change various settings, such as the number of minutes between readings
 - secret_user_settings.h   used to change various secret settings, such as your WiFi password
 	
-Uses a I2C and BME680 driver from this Espressif ESP-IDF component library https://github.com/UncleRus/esp-idf-lib  
-The BME680 driver was forked from the original driver by Gunar Schorcht https://github.com/gschorcht/bme680-esp-idf
+Uses a I2C and BME680 driver from this Espressif ESP-IDF component library
+https://github.com/UncleRus/esp-idf-lib  
+
+The BME680 driver was forked from the original driver by Gunar Schorcht
+https://github.com/gschorcht/bme680-esp-idf
+
 
 Donations welcome https://rlatour.com
