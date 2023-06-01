@@ -44,7 +44,7 @@ Power consumption varies depending on the approach chosen for sleep between repo
   Manual light sleep:
     With this option, the esp32 will not preserve the Wi-Fi 6 connection between readings, rather it will reconnect to Wi-Fi when it is time to publish the data.
     The advantage of manual light sleep is that the device will not need to reboot as is required for awaking from deep sleep.
-    The disadvantages of this are that the Wi-Fi will need to be reconnected when it is time to publish the data, and the device will use more power between readings than deep sleep. ???
+    The disadvantages of this are that the Wi-Fi will need to be reconnected when it is time to publish the data, and the device will use more power between readings than with deep sleep.
 
   Automated light sleep:
     Automatic light sleep allows the Wi-Fi 6 connection to be preserve between readings.
