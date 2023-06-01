@@ -53,7 +53,7 @@ Power consumption varies depending on the approach chosen for sleep between repo
     The disadvantage of preserving the Wi-Fi 6 connection is that the device will use more power between readings than when in either manual light sleep or deep sleep.
     Accordingly, this is likely the best option for shorter reporting periods.
 
-Here are some average power consumption results: 
+Here are some average hourly power consumption results: 
 
 | Reporting Period |Deep Sleep|Automatic Light Sleep|Manual Light Sleep|
 |------------------|:--------:|:-------------------:|:----------------:|
