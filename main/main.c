@@ -331,7 +331,7 @@ void get_bme680_readings()
             if (bme680_get_results_float(&sensor, &values) == ESP_OK)
             {
                 // apply a reasonability check against the readings
-                BME680_readings_are_reasonable = ((humidity <= 100.0f) && (temperature >= -60.0f) && (temperature <= 140.0f) && (pressure >= 870.0f));
+                BME680_readings_are_reasonable = ((humidity <= 100.0f) && (temperature >= -60.0f) && (temperature <= 140.0f) && (pressure >= 870.0f) && (pressure <= 1090.0f));
 
                 if (!BME680_readings_are_reasonable)
                 {
