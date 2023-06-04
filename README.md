@@ -73,6 +73,8 @@ The above findings are based on limited testing, and in all cases:
   having removed the power LED on the ESP32-C6 (which saved about .3 mA)
 
   Also, although the above numbers don't reflect it, further power savings can be realized by setting the ESP-IDF: SDK Config - ROM Bootlog Behavior - permanently change Boot ROM output to permanently disable logging (of note this is irreversible).  This change will have the greatest marked savings when deep sleep is used.
+  
+  Finally, the numbers above are based on supplying power via the 5v VIN pin.  If however you are able to supply a regulated 3.3v via the board's 3.3v pin then further power savings would be realized.
 
 # The code
 
