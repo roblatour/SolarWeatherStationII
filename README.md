@@ -55,11 +55,11 @@ Power consumption varies depending on the approach chosen for sleep between repo
 
 Here are some average hourly power consumption results: 
 
-| Reporting Period |Deep Sleep|Automatic Light Sleep|Manual Light Sleep|
-|------------------|:--------:|:-------------------:|:----------------:|
-|5 minutes |2.50 mA|2.22 mA|2.57 mA|
-|10 minutes|2.05 mA|2.18 mA|2.72 mA|
-|15 minutes|1.84 mA|2.09 mA|2.79 mA|
+| Reporting Period |Reports/hour|Deep Sleep|Automatic Light Sleep|Manual Light Sleep|
+|------------------|:----------:|:--------:|:-------------------:|:----------------:|
+|5 minutes |12|2.50 mA|2.22 mA|2.57 mA|
+|10 minutes|6|2.05 mA|2.18 mA|2.72 mA|
+|15 minutes|4|1.84 mA|2.09 mA|2.79 mA|
 
 The above findings are based on limited testing, and in all cases:
 
