@@ -595,9 +595,23 @@ static void setup_WIFI6_targeted_wake_time()
             esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
 
             esp_err_t err = ESP_OK;
-            int flow_id = 0;
-            err = esp_wifi_sta_itwt_setup(TWT_REQUEST, ITWT_TRIGGER_ENABLED, ITWT_ANNOUNCED, ITWT_MIN_WAKE_DURATION,
-                                          GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_EXPN, GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_MANT, &flow_id);
+        
+            bool flow_type_announced = true;
+            uint16_t twt_timeout = 5000;
+
+            wifi_twt_setup_config_t setup_config = {
+                .setup_cmd = TWT_REQUEST,
+                .flow_id = 0, // announced individual TWT agreement
+                .twt_id = 0,
+                .flow_type = flow_type_announced ? 0 : 1,
+                .min_wake_dura = ITWT_MIN_WAKE_DURATION,
+                .wake_invl_expn = GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_EXPN,
+                .wake_invl_mant = GENERAL_USER_SETTINGS_ITWT_WAKE_INVL_MANT,
+                .trigger = ITWT_TRIGGER_ENABLED,
+                .timeout_time_ms = twt_timeout,
+            };
+
+            err = esp_wifi_sta_itwt_setup(&setup_config);
 
             if (err == ESP_OK)
                 ESP_LOGI(TAG, "Wi-Fi 6 Targeted Wake Time setup succeeded!");
@@ -664,17 +678,17 @@ static void WiFi_beacon_timeout_handler(void *arg, esp_event_base_t event_base, 
 static void WiFi6_itwt_setup_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     wifi_event_sta_itwt_setup_t *setup = (wifi_event_sta_itwt_setup_t *)event_data;
-    if (setup->setup_cmd == TWT_ACCEPT)
+    if (setup->config.setup_cmd == TWT_ACCEPT)
     {
         /* TWT Wake Interval = TWT Wake Interval Mantissa * (2 ^ TWT Wake Interval Exponent) */
-        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>flow_id:%d, %s, %s, wake_dura:%d, wake_invl_e:%d, wake_invl_m:%d", setup->flow_id,
-                 setup->trigger ? "trigger-enabled" : "non-trigger-enabled", setup->flow_type ? "unannounced" : "announced",
-                 setup->min_wake_dura, setup->wake_invl_expn, setup->wake_invl_mant);
-        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>wake duration:%d us, service period:%d us", setup->min_wake_dura << 8, setup->wake_invl_mant << setup->wake_invl_expn);
+        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>twt_id:%d, flow_id:%d, %s, %s, wake_dura:%d, wake_invl_e:%d, wake_invl_m:%d", setup->config.twt_id,
+                 setup->config.flow_id, setup->config.trigger ? "trigger-enabled" : "non-trigger-enabled", setup->config.flow_type ? "unannounced" : "announced",
+                 setup->config.min_wake_dura, setup->config.wake_invl_expn, setup->config.wake_invl_mant);
+        ESP_LOGI(TAG, "<WIFI_EVENT_ITWT_SETUP>wake duration:%d us, service period:%d us", setup->config.min_wake_dura << 8, setup->config.wake_invl_mant << setup->config.wake_invl_expn);
     }
     else
     {
-        ESP_LOGE(TAG, "<WIFI_EVENT_ITWT_SETUP>unexpected setup command:%d", setup->setup_cmd);
+        ESP_LOGE(TAG, "<WIFI_EVENT_ITWT_SETUP>twt_id:%d, unexpected setup command:%d", setup->config.twt_id, setup->config.setup_cmd);
     }
 }
 
@@ -1008,6 +1022,33 @@ void startup_validations_and_displays()
     ESP_LOGI(TAG, "sleep time between cycles: %d seconds", GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60);
 }
 
+void connect_to_WiFi()
+{
+
+    // Check if Wi-Fi is already connected
+
+    wifi_ap_record_t ap_info;
+    esp_wifi_sta_get_ap_info(&ap_info);
+    if (ap_info.rssi != 0)
+    {
+        ESP_LOGI(TAG, "WIFI was previously connected, reconnecting (%d)", (int)ap_info.rssi);
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        ESP_ERROR_CHECK(esp_wifi_connect());
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "WIFI was previously not connected, connecting");
+        turn_on_Wifi();
+    };
+
+    if (!WiFi_is_connected)
+    {
+        ESP_LOGE(TAG, "WIFI is not connected");
+        restart_after_two_minutes();
+    }
+}
+
 void app_main(void)
 {
 
@@ -1019,10 +1060,7 @@ void app_main(void)
 
     initialize_the_external_switch();
 
-    turn_on_Wifi();
-
-    if (!WiFi_is_connected)
-        restart_after_two_minutes();
+    connect_to_WiFi();
 
     while (true)
     {
