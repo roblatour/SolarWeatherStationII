@@ -54,11 +54,14 @@ Power consumption varies depending on the approach chosen for sleep between repo
     The disadvantage of preserving the Wi-Fi 6 connection is that the device will use more power between readings than when in either manual light sleep or deep sleep.
     Accordingly, this is likely the best option for shorter reporting periods.
 	
-   TPL5100:
-   Also, as an alternative to the various ESP32 sleep modes above, a TLP5100 circuit may be used.  I used this one from Sparkfun: https://www.sparkfun.com/products/15353
-   As the Espressif ESP32-C6 Devkit C-1 is somewhat power hungry the TPL5100 manages the power going into the ESP32 development board. 
-   Using a TPL5100 provided for significant overall power consumption, even over deep sleep.  
-   To explain: the TPL5100 is like an external deep sleep function for the ESP32 development board.  With a preset cycle period is hardwired, for example for 15 minutes.   When initially powered from your power supply, the TPL500 will start passing power through to the development board.  When the ESP32 completes its tasks for a cycle (say in 10 seconds) it them ends by triggering the TPL5100 to cut off power to the ESP32 development board.  The TPL5100 then cuts off the power until the start of the cycle after which time it resumes sending power to the development board for another cycle.  
+  If you would like to learn more about the ESP3-C6, WiFi 6, and ESP32 sleep alternatives, here is a very informmative video from Espresif https://www.youtube.com/watch?v=FpTwQlGtV0k
+	
+  Additionally, as the Espressif ESP32-C6 Devkit C-1 is somewhat power hungry as an alternative to the various ESP32 sleep modes above a TLP5100 circuit may be used.
+ 
+  TPL5100:
+    I use this one from Sparkfun: https://www.sparkfun.com/products/15353     
+    Using a TPL5100 provided for significant overall power consumption, even over deep sleep.  
+    To explain: the TPL5100 is like an external deep sleep function for the ESP32 development board.  With a preset cycle period is hardwired, for example for 15 minutes.   When initially powered from your power supply, the TPL500 will start passing power through to the development board.  When the ESP32 completes its tasks for a cycle (say in 10 seconds) it them ends by triggering the TPL5100 to cut off power to the ESP32 development board.  The TPL5100 then cuts off the power until the start of the cycle after which time it resumes sending power to the development board for another cycle.  
    
 
 Here are some average hourly power consumption results: 
@@ -82,7 +85,6 @@ The above findings are based on limited testing, and:
 
   Finally, although the above numbers don't reflect it, further power savings can be realized by setting the ESP-IDF: SDK Config - ROM Bootlog Behavior - permanently change Boot ROM output to permanently disable logging (of note this is irreversible).  This change will have the greatest marked savings when deep sleep is used.
   
-
 # The code
 
 The code includes two companion files in the main directory:
@@ -94,6 +96,11 @@ https://github.com/UncleRus/esp-idf-lib
 
 The BME680 driver was forked from the original driver by Gunar Schorcht
 https://github.com/gschorcht/bme680-esp-idf
+
+# PCB
+
+In my final solution I am using an ESP32-C6 DevkitC-1 v1.2 along with the TPL5100 board mentioned above.  In order to cut down on the wiring within my solar weather station enclosure I desiged the following open source PCB, which you are welcome to use if you like. 
+Here is a link to the PCB: https://oshwlab.com/roblatour/weather-station-2023_copy
 
 
 Donations welcome https://rlatour.com
