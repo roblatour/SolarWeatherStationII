@@ -54,7 +54,7 @@ Power consumption varies depending on the approach chosen for sleep between repo
     The disadvantage of preserving the Wi-Fi 6 connection is that the device will use more power between readings than when in either manual light sleep or deep sleep.
     Accordingly, this is likely the best option for shorter reporting periods.
 	
-  If you would like to learn more about the ESP3-C6, WiFi 6, and ESP32 sleep alternatives, here is a very informmative video from Espresif https://www.youtube.com/watch?v=FpTwQlGtV0k
+  If you would like to learn more about WiFi 6, TWT, and ESP32 sleep alternatives, here is a very informmative video from Espresif https://www.youtube.com/watch?v=FpTwQlGtV0k
 	
   Additionally, as the Espressif ESP32-C6 Devkit C-1 is somewhat power hungry as an alternative to the various ESP32 sleep modes above a TLP5100 circuit may be used.
  
