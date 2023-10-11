@@ -1,18 +1,19 @@
 # WeatherStation 
-Using an ESP32-C6, WiFi 6, and a BME680 sensor
+Using an ESP32-C6, Wi-Fi 6 and a BME680 sensor
 Publishing to MQTT and optionally PWSWeather.com
 
 Open source Weather Station by Rob Latour, 2023, MIT license
 
 # Featuring
 
-- a power conscious hardware and software design for use within a solar powered project 
-  - 2.4GHz WiFi 6 connectivity with Targeted Wake Time (TWT) using an Espressif ESP32-C6 Devkit C-1, and a
+  - a power conscious hardware and software design for use within a solar powered project 
+  - 2.4GHz Wi-Fi 6 connectivity with Targeted Wake Time (TWT) using an Espressif ESP32-C6 Devkit C-1, 
   - DFRobot Solar Power Manager 5V
+  - (optional) Sparkfun TPL5110 Nano Power Timer
   
 - temperature, pressure and humidity using a BME680 sensor
 
-- an external switch to toggle on or off reporting to PWSWeather
+- an external switch / jumper to toggle on or off reporting to PWSWeather
   which is handy if moving the weather station indoors for whatever reason
   (uses an internal pullup resistor so a resistor external to the ESP32-C6 isn't required)
 
@@ -26,7 +27,7 @@ Open source Weather Station by Rob Latour, 2023, MIT license
 
 # Build environment
 
-Built using release version 5.1 Espressif's ESP-IDF with the Espressif Visual Studio Code extention version 1.6.3
+Built using release version 5.1 Espressif's ESP-IDF with the Espressif Visual Studio Code extention version 1.83
 
 Note: at the time of ESP-IDF release 5.1 is not yet a final stable release, but it is far enough along to fully support this project
 
@@ -52,16 +53,23 @@ Power consumption varies depending on the approach chosen for sleep between repo
     Also, automatic light sleep allows the use of power management, which reduces the power consumption durning sleep but not to the degree that it is reduced by manual light sleep as with automatic light sleep the esp32 continues to respond to Wi-Fi beacons. 
     The disadvantage of preserving the Wi-Fi 6 connection is that the device will use more power between readings than when in either manual light sleep or deep sleep.
     Accordingly, this is likely the best option for shorter reporting periods.
+	
+   TPL5100:
+   Also, as an alternative to the various ESP32 sleep modes above, a TLP5100 circuit may be used.  I used this one from Sparkfun: https://www.sparkfun.com/products/15353
+   As the Espressif ESP32-C6 Devkit C-1 is somewhat power hungry the TPL5100 manages the power going into the ESP32 development board. 
+   Using a TPL5100 provided for significant overall power consumption, even over deep sleep.  
+   To explain: the TPL5100 is like an external deep sleep function for the ESP32 development board.  With a preset cycle period is hardwired, for example for 15 minutes.   When initially powered from your power supply, the TPL500 will start passing power through to the development board.  When the ESP32 completes its tasks for a cycle (say in 10 seconds) it them ends by triggering the TPL5100 to cut off power to the ESP32 development board.  The TPL5100 then cuts off the power until the start of the cycle after which time it resumes sending power to the development board for another cycle.  
+   
 
 Here are some average hourly power consumption results: 
 
-| Reporting Period |Reports/hour|Deep Sleep|Automatic Light Sleep|Manual Light Sleep|
-|------------------|:----------:|:--------:|:-------------------:|:----------------:|
-|5 minutes |12|2.50 mA|2.22 mA|2.57 mA|
-|10 minutes|6|2.05 mA|2.18 mA|2.72 mA|
-|15 minutes|4|1.84 mA|2.09 mA|2.79 mA|
+| Reporting Period |Reports/hour|Deep Sleep|Automatic Light Sleep|Manual Light Sleep|TLP5100|
+|------------------|:----------:|:--------:|:-------------------:|:----------------:|:----------------:|
+|5 minutes |12|2.50 mA|2.22 mA|2.57 mA|0.577 mA|
+|10 minutes|6|2.05 mA|2.18 mA|2.72 mA|0.428 mA|
+|15 minutes|4|1.84 mA|2.09 mA|2.79 mA|0.469 mA|
 
-The above findings are based on limited testing, and in all cases:
+The above findings are based on limited testing, and: 
 
   connecting to a Wi-Fi 6 access point
 
@@ -70,11 +78,10 @@ The above findings are based on limited testing, and in all cases:
 
   using esp_wifi_set_ps(WIFI_PS_MAX_MODEM)
 
-  having removed the power LED on the ESP32-C6 (which saved about .3 mA)
+  having removed the power LED on the ESP32-C6
 
-  Also, although the above numbers don't reflect it, further power savings can be realized by setting the ESP-IDF: SDK Config - ROM Bootlog Behavior - permanently change Boot ROM output to permanently disable logging (of note this is irreversible).  This change will have the greatest marked savings when deep sleep is used.
+  Finally, although the above numbers don't reflect it, further power savings can be realized by setting the ESP-IDF: SDK Config - ROM Bootlog Behavior - permanently change Boot ROM output to permanently disable logging (of note this is irreversible).  This change will have the greatest marked savings when deep sleep is used.
   
-  Finally, the numbers above are based on supplying 5v to the 5v VIN pin on the ESP32-c6 Devkit board.  If however you are able to supply a regulated 3.3v via the board's 3.3v pin then further power savings would be realized.
 
 # The code
 

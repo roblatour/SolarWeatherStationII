@@ -1,3 +1,5 @@
+// alt shift f to tidy up code
+
 // (Wi-Fi 6) Weather Station
 
 // Copyright Rob Latour, 2023
@@ -80,6 +82,10 @@ static const char *TAG = GENERAL_USER_SETTINGS_TAG;
 
 #define WIFI_LISTEN_INTERVAL 100
 
+// TPL5100
+#define HIGH 1
+#define LOW 0
+
 // Global variables
 
 volatile bool BME680_readings_are_reasonable;
@@ -109,6 +115,8 @@ volatile bool PWSWeather_Publishing_Done;
 volatile bool PWSWeather_unknown_error = false;
 
 volatile bool going_to_sleep = false;
+
+volatile bool ignore_disconnect_event = false;
 
 volatile esp_mqtt_client_handle_t MQTT_client;
 
@@ -306,7 +314,7 @@ void get_bme680_readings()
     // this measurement will not counted in the attempts counter below
     if (bme680_force_measurement(&sensor) == ESP_OK)
     {
-        vTaskDelay(duration);
+        vTaskDelay(duration / portTICK_PERIOD_MS);
         if (bme680_get_results_float(&sensor, &values) == ESP_OK)
         {
             // ESP_LOGI(TAG, "throw away measurement taken");
@@ -322,7 +330,7 @@ void get_bme680_readings()
 
         if (bme680_force_measurement(&sensor) == ESP_OK)
         {
-            vTaskDelay(duration); // wait until measurement results are available
+            vTaskDelay(duration / portTICK_PERIOD_MS); // wait until measurement results are available
 
             temperature = values.temperature;
             humidity = values.humidity;
@@ -419,11 +427,17 @@ void publish_readings_via_MQTT()
             }
             else
             {
+
                 esp_mqtt_client_unregister_event(MQTT_client, ESP_EVENT_ANY_ID, mqtt_event_handler);
                 ESP_LOGI(TAG, "MQTT failed to connected (attempt %d of %d)", attempts, max_attempts);
+
                 if (attempts == max_attempts)
                     ESP_LOGE(TAG, "Reached the MQTT connection attempt threshold");
-                vTaskDelay(20 / portTICK_PERIOD_MS);
+                else
+                {
+                    vTaskDelay(20 / portTICK_PERIOD_MS);
+                };
+
                 MQTT_unknown_error = true;
             };
 
@@ -553,6 +567,7 @@ static void WiFi_start_handler(void *arg, esp_event_base_t event_base, int32_t e
 
 static void WiFi_connected_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
+    WiFi_is_connected = false;
     ESP_LOGI(TAG, "Wi-Fi connected");
 }
 
@@ -564,9 +579,14 @@ static void WiFi_disconnect_handler(void *arg, esp_event_base_t event_base, int3
         ESP_LOGI(TAG, "Wi-Fi disconnected");
     else
     {
-        ESP_LOGI(TAG, "Wi-Fi disconnected, reconnecting");
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        if (ignore_disconnect_event)
+            ESP_LOGI(TAG, "Wi-Fi disconnected, but ignoring as system is going into deep sleep");
+        else
+        {
+            ESP_LOGI(TAG, "Wi-Fi disconnected, reconnecting");
+            xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+            ESP_ERROR_CHECK(esp_wifi_connect());
+        }
     }
 }
 
@@ -595,7 +615,7 @@ static void setup_WIFI6_targeted_wake_time()
             esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
 
             esp_err_t err = ESP_OK;
-        
+
             bool flow_type_announced = true;
             uint16_t twt_timeout = 5000;
 
@@ -665,7 +685,9 @@ static void got_ip_handler(void *arg, esp_event_base_t event_base, int32_t event
     xEventGroupClearBits(wifi_event_group, DISCONNECTED_BIT);
     xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
 
-    setup_WIFI6_targeted_wake_time();
+    // don't setup Wi-Fi 6 targeted wake time if we're going to use deep sleep
+    if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH > 0)
+        setup_WIFI6_targeted_wake_time();
 
     WiFi_is_connected = true;
 }
@@ -789,7 +811,6 @@ static void start_wifi()
 
     esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
 
-    // esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11AX);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX);
 
     esp_wifi_set_country_code(GENERAL_USER_SETTINGS_WIFI_COUNTRY_CODE, true);
@@ -827,25 +848,59 @@ void turn_on_Wifi()
 
     ESP_LOGI(TAG, "Turn on Wi-Fi");
 
+    WiFi_is_connected = false;
+    esp_wifi_stop(); // should not be needed but seems to help?
     start_wifi();
-
-    // wait for wifi to connect
-    int64_t timeout = esp_timer_get_time() + GENERAL_USER_SETTINGS_WIFI_CONNECT_TIMEOUT_PERIOD * 1000000;
-    while (!WiFi_is_connected && (esp_timer_get_time() < timeout))
-        vTaskDelay(20 / portTICK_PERIOD_MS);
-
-    if (!WiFi_is_connected)
-        ESP_LOGE(TAG, "Timed out trying to connect to Wi-Fi");
 };
 
 void goto_sleep()
 {
 
-    // Please see the 'Important Note' at top of this file for more information on the following work arounds
+    // GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH values:
+    // 0 to use deep sleep
+    // 1 to use automatic light sleep; also EDF-ISP: F1 -> SDK Configuration -> Component config -> FreeRTOS -> Tickless Idle (must be checked)
+    // 2 to use manual light sleep; also EDF-ISP: F1 -> SDK Configuration -> Component config -> FreeRTOS -> Tickless Idle (must be unchecked)
+    // 3 to use a TPL5100 board; also EDF-ISP: F1 -> SDK Configuration -> Component config -> FreeRTOS -> Tickless Idle (must be unchecked)
 
     static int cycle = 1;
     int64_t cycle_time;
     int64_t sleep_time;
+    cycle_time = esp_timer_get_time() - cycle_start_time;
+
+    // TPL5100 sleep approach
+    if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 3)
+    {
+        ignore_disconnect_event = true;
+        esp_wifi_stop();
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+
+        // report processing time for this cycle
+        cycle_time = esp_timer_get_time();
+        ESP_LOGW(TAG, "processing time: %f seconds", (float)((float)cycle_time / (float)1000000));
+
+        ESP_LOGI(TAG, "triggering TPL5100 shutdown request");
+
+        gpio_reset_pin(GENERAL_USER_SETTINGS_TPL5100_DONE_GPIO_PIN);
+        gpio_set_direction(GENERAL_USER_SETTINGS_TPL5100_DONE_GPIO_PIN, GPIO_MODE_OUTPUT);
+
+        gpio_set_level(GENERAL_USER_SETTINGS_TPL5100_DONE_GPIO_PIN, LOW);
+        gpio_set_level(GENERAL_USER_SETTINGS_TPL5100_DONE_GPIO_PIN, HIGH);
+
+        vTaskDelay(2000 / portTICK_PERIOD_MS); // power should turn off right away
+
+        ESP_LOGE(TAG, "You should only see this if a TPL5100 board is not connected");
+
+        //while (true)
+        //    vTaskDelay(10 / portTICK_PERIOD_MS);
+
+        // by now the power should be off
+        // if it does not go off as expected then the code below will act as a fail safe
+        ESP_LOGW(TAG, "Going into deep sleep as a fail safe");
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+        sleep_time = ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000) - cycle_time;
+        esp_sleep_enable_timer_wakeup(sleep_time);
+        esp_deep_sleep_start();
+    };
 
     // if we have had a relatively serious problem force deep sleep rather than light sleep
     // this will effectively reset the esp32
@@ -917,6 +972,10 @@ void goto_sleep()
     else
     // deep sleep approach
     {
+        // testing here
+        ignore_disconnect_event = true;
+        // esp_wifi_stop();
+        // esp_wifi_deinit();
 
         if (cycle_time < ((GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES * 60) * 1000000))
         {
@@ -960,20 +1019,23 @@ void initalize_non_volatile_storage()
 void initialize_the_external_switch()
 {
     // Initialize the external switch used to determine if the readings should be reported to PWSWeather.com
+
     gpio_config_t io_conf;
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = 1ULL << GENERAL_USER_SETTINGS_EXTERNAL_SWITCH_GPIO_PIN;
-    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    // io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io_conf);
 }
 
-void restart_after_two_minutes()
+void restart_after_this_many_seconds(int seconds)
 {
-    ESP_LOGE(TAG, "delaying for two minutes and then restarting");
+
+    ESP_LOGE(TAG, "Delaying for %d seconds and then restarting", seconds);
     vTaskDelay(20 / portTICK_PERIOD_MS);
-    esp_sleep_enable_timer_wakeup(2 * 60 * 1000000);
+    esp_sleep_enable_timer_wakeup(seconds * 1000000);
     esp_deep_sleep_start();
 }
 
@@ -991,25 +1053,31 @@ void startup_validations_and_displays()
     if (GENERAL_USER_SETTINGS_REPORTING_FREQUENCY_IN_MINUTES <= 0)
     {
         ESP_LOGE(TAG, "invalid reporting frequency");
-        restart_after_two_minutes();
+        restart_after_this_many_seconds(120);
     };
 
-    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH < 0) || (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH > 2))
+    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH < 0) || (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH > 3))
     {
         ESP_LOGE(TAG, "invalid sleep approach");
-        restart_after_two_minutes();
+        restart_after_this_many_seconds(120);
     };
 
     if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 1) && !tickless_idle_enabled)
     {
         ESP_LOGE(TAG, "automatic light sleep requires tickless idle to be enabled");
-        restart_after_two_minutes();
+        restart_after_this_many_seconds(120);
     }
 
     if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 2) && tickless_idle_enabled)
     {
         ESP_LOGE(TAG, "manual light sleep requires tickless idle to be disabled");
-        restart_after_two_minutes();
+        restart_after_this_many_seconds(120);
+    };
+
+    if ((GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 3) && tickless_idle_enabled)
+    {
+        ESP_LOGE(TAG, "TPL5100 sleep requires tickless idle to be disabled");
+        restart_after_this_many_seconds(120);
     };
 
     if (GENERAL_USER_SETTINGS_USE_AUTOMATIC_SLEEP_APPROACH == 0)
@@ -1031,22 +1099,27 @@ void connect_to_WiFi()
     esp_wifi_sta_get_ap_info(&ap_info);
     if (ap_info.rssi != 0)
     {
-        ESP_LOGI(TAG, "WIFI was previously connected, reconnecting (%d)", (int)ap_info.rssi);
+        ESP_LOGI(TAG, "WIFI was previously connected, reconnecting (%d) ...", (int)ap_info.rssi);
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         ESP_ERROR_CHECK(esp_wifi_connect());
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
     else
     {
-        ESP_LOGW(TAG, "WIFI was previously not connected, connecting");
+        ESP_LOGW(TAG, "WIFI was previously not connected, connecting ...");
         turn_on_Wifi();
     };
 
+    // wait for Wi-Fi to connect / reconnect
+
+    int64_t timeout = esp_timer_get_time() + GENERAL_USER_SETTINGS_WIFI_CONNECT_TIMEOUT_PERIOD * 1000000;
+    while ((!WiFi_is_connected) && (esp_timer_get_time() < timeout))
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+
     if (!WiFi_is_connected)
     {
-        ESP_LOGE(TAG, "WIFI is not connected");
-        restart_after_two_minutes();
-    }
+        ESP_LOGE(TAG, "Could not connect to WIFI within the timeout period.");
+        restart_after_this_many_seconds(GENERAL_USER_SETTINGS_DEEP_SLEEP_PERIOD_WHEN_WIFI_CANNOT_CONNECT);
+    };
 }
 
 void app_main(void)
@@ -1074,7 +1147,7 @@ void app_main(void)
         else
         {
             ESP_LOGE(TAG, "couldn't get a valid reading from the BME680; please check the wiring;");
-            restart_after_two_minutes();
+            restart_after_this_many_seconds(120);
         };
 
         goto_sleep();
