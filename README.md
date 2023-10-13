@@ -102,8 +102,9 @@ https://github.com/gschorcht/bme680-esp-idf
 While the code above allows your ESP32 to publish your weather readings directly to PWSWeather.com doing so does required more energy.   Accordingly, in a solar based solution to preserve power if you have a Node-Red running along side your MQTT server (as can be done in Home Assistant as an example), you may opt to have the ESP32 only report its weather readings via MQTT, and have your Node-Red subscribe to and relay those readings to PWSWeather.com.
 
 Here is a picture of the Node-Red flow that I have built for this purpose:
+![components](https://github.com/roblatour/WeatherStation/blob/main/Node-Red/Node-Red-Flow.jpg)
 
-And the flow itself is also available in this repository here.
+and the code for the flow itself is also included within this repository.
 
 # PCB
 
