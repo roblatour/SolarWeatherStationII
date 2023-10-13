@@ -97,6 +97,14 @@ https://github.com/UncleRus/esp-idf-lib
 The BME680 driver was forked from the original driver by Gunar Schorcht
 https://github.com/gschorcht/bme680-esp-idf
 
+# (Optionally) using Node-Red 
+
+While the code above allows your ESP32 to publish your weather readings directly to PWSWeather.com doing so does required more energy.   Accordingly, in a solar based solution to preserve power if you have a Node-Red running along side your MQTT server (as can be done in Home Assistant as an example), you may opt to have the ESP32 only report its weather readings via MQTT, and have your Node-Red subscribe to and relay those readings to PWSWeather.com.
+
+Here is a picture of the Node-Red flow that I have built for this purpose:
+
+And the flow itself is also available in this repository here.
+
 # PCB
 
 In my final solution I am using an ESP32-C6 DevkitC-1 v1.2 along with the TPL5100 board mentioned above.  In order to cut down on the wiring within my solar weather station enclosure I desiged the following open source PCB, which you are welcome to use if you like. 
