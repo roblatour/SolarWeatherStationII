@@ -384,7 +384,7 @@
         "datatype": "auto-detect",
         "id": "7b595797c3f4ce2c",
         "inputs": 0,
-        "name": "MQTT got pressure ",
+        "name": "MQTT get pressure ",
         "nl": false,
         "qos": "2",
         "rap": true,
