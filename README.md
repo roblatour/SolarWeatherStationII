@@ -62,7 +62,6 @@ Power consumption varies depending on the approach chosen for sleep between repo
     I use this one from Sparkfun: https://www.sparkfun.com/products/15353     
     Using a TPL5100 provided for significant overall power consumption, even over deep sleep.  
     To explain: the TPL5100 is like an external deep sleep function for the ESP32 development board.  With a preset cycle period is hardwired, for example for 15 minutes.   When initially powered from your power supply, the TPL500 will start passing power through to the development board.  When the ESP32 completes its tasks for a cycle (say in 10 seconds) it them ends by triggering the TPL5100 to cut off power to the ESP32 development board.  The TPL5100 then cuts off the power until the start of the cycle after which time it resumes sending power to the development board for another cycle.  
-   
 
 Here are some average hourly power consumption results: 
 
