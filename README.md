@@ -9,7 +9,7 @@ Open source Weather Station by Rob Latour, 2023, MIT license
   - a power conscious hardware and software design for use within a solar powered project 
   - 2.4GHz Wi-Fi 6 connectivity with Targeted Wake Time (TWT) using an Espressif ESP32-C6 Devkit C-1, 
   - DFRobot Solar Power Manager 5V
-  - (optional) Sparkfun TPL5110 Nano Power Timer
+  - (optional) Sparkfun TPL5110 Nano Power Timer (see notes below)
   
 - temperature, pressure and humidity using a BME680 sensor
 
