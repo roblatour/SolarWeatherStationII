@@ -1,4 +1,4 @@
-# WeatherStation 
+# Weather Station II
 Using an ESP32-C6, Wi-Fi 6 and a BME680 sensor
 Publishing to MQTT and optionally PWSWeather.com
 
