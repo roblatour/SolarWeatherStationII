@@ -4,6 +4,8 @@ Publishing to MQTT and optionally PWSWeather.com
 
 Open source Weather Station by Rob Latour, 2023, MIT license
 
+Please see [Solar Weather Station III](https://github.com/roblatour/SolarWeatherStationIII) for the latest update!
+
 # Featuring
 
   - a power conscious hardware and software design for use within a solar powered project 
