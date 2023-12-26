@@ -111,7 +111,7 @@ with the code for it also included within this repository.
 # PCB
 
 In my final solution I am using an ESP32-C6 DevkitC-1 v1.2 along with the TPL5100 board mentioned above.  In order to cut down on the wiring within my solar weather station enclosure I desiged the following open source PCB, which you are welcome to use if you like. 
-Here is a link to the PCB: https://oshwlab.com/roblatour/weather-station-2023_copy
+Here is a link to the PCB: https://oshwlab.com/roblatour/weather-station-2023_copy (However, please see the comments above about the TPL5100 board above - ultimately something that didn't work out for me).
 
 
 Donations welcome https://rlatour.com
